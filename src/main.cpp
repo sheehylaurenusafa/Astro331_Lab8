@@ -8,6 +8,7 @@
  * - Ground station command interface via XBee radio and USB Serial
  * - Battery telemetry monitoring via MAX17048 fuel gauge
  * - Data logging to SD card for Lab 6 and Lab 7 experiments
+ * - Lab 8 fan thrusters: manual control, thrust sweep, open-loop slew, RW momentum dump
  * 
  * @author Lt Col Wyatt Harris
  * @date Spring 2026
@@ -34,7 +35,7 @@
  * @section commands Ground Station Commands
  * | Cmd | Function |
  * |-----|----------|
- * | 0   | Stop reaction wheel |
+ * | 0   | Stop reaction wheel and thrusters |
  * | 1   | Display options menu |
  * | 2   | Query XBee RSSI |
  * | 3   | Toggle status LED |
@@ -43,6 +44,11 @@
  * | 6   | Run Lab 6 test (Attitude Determination) |
  * | 7   | Run Lab 7 Test A (tabletop static, RW torque measurement) |
  * | 8   | Run Lab 7 Test B (dynamic test with prescribed wheel speed) |
+ * | 9   | Stream reaction wheel speed |
+ * | 10  | Lab 8: Manually set thrusters (-100 to 100%, + = +Z fan, - = -Z fan) |
+ * | 11  | Lab 8: Thrust sweep (bench, each fan stepped 0-100%) |
+ * | 12  | Lab 8: Open-loop thruster slew (string-hung) |
+ * | 13  | Lab 8: RW momentum dump with thruster rate damping (string-hung) |
  * | 98  | SD Card: List files (USB Serial only) |
  * | 99  | SD Card: Print file menu (USB Serial only) |
  * 
@@ -50,6 +56,9 @@
  * - **Lab 6**: Collects IMU (gyro Z, mag X/Y) and sun sensor data at 50ms intervals
  * - **Lab 7A**: 15-second tabletop test with 100% motor step input from 3-10 seconds
  * - **Lab 7B**: 50-second dynamic test with prescribed motor speed profile (hold, ramp up/down cycles)
+ * - **Lab 8 Sweep**: each fan held 5 s at 25/50/75/100% duty with 3 s off between steps (read thrust off a scale)
+ * - **Lab 8 Slew**: 2 s idle, +Z burn, equal -Z burn to stop, then coast (open loop)
+ * - **Lab 8 Dump**: RW spun to full speed, release on blue LED, RW ramped to zero while thrusters damp body rate
  * 
  * @section datalog Data Logging Format
  * All test data is logged to SD card in CSV format with:
@@ -68,7 +77,8 @@
  * 
  * @note Heartbeat signal sent every 2 seconds to indicate program status
  * @note Ground station commands checked every 10ms
- * @note RGB LED provides visual status: Red (startup), Green (idle), Orange (Lab 6), Cyan (Lab 7A), Magenta (Lab 7B)
+ * @note RGB LED provides visual status: Red (startup), Green (idle), Orange (Lab 6), Cyan (Lab 7A), Magenta (Lab 7B),
+ *       Yellow (Lab 8 sweep), White (Lab 8 slew / dump hold), Blue (Lab 8 dump: release KestrelSAT)
  * 
  * @warning All test loops use blocking serial reads; may delay program execution if waiting for input
  * @warning Reaction wheel tests should be conducted with appropriate safety precautions
@@ -90,6 +100,7 @@
 #include <ICM_20948.h>                                    // Sparkfun IMU library
 #include <TB9051FTGMotorCarrier.h>                        // Pololu Motor Carrier Library
 #include <ESP32Encoder.h>                                 // Motor encoder library to measure wheel speed
+#include "thrusters.h"                                    // Lab 8 fan thruster driver (this directory)
 
 /*---------------------------------------------------------------------------------------------*/
 // Globals:
@@ -136,6 +147,10 @@ void lab7_run_test_A();
 void lab7_run_test_B();
 float set_speed_test_B(uint32_t t0);
 void stream_RWspeed();
+void manual_set_thrusters();
+void lab8_thrust_sweep();
+void lab8_thruster_slew();
+void lab8_momentum_dump();
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // SETUP:
@@ -210,6 +225,12 @@ void setup() {
   driver.setOutput(0);
   enc.attachFullQuad(ENCODER_PIN_A, ENCODER_PIN_B); // Motor Encoder
   enc.clearCount();
+  //----------------------------------------------
+
+  //----------------------------------------------
+  // Initialize Thrusters
+  //----------------------------------------------
+  thrusters_init();
   //----------------------------------------------
 
   Serial.println("[INFO] SETUP COMPLETE.");
@@ -325,12 +346,13 @@ void process_main_menu() {
   switch (received_int) {
     case 0:
       driver.setOutput(0);
-      Xbee.println("Motor Stopped.");
-      Serial.println("Motor Stopped.");
+      thrusters_off();
+      Xbee.println("Motor and Thrusters Stopped.");
+      Serial.println("Motor and Thrusters Stopped.");
       break;
     
     case 1:
-      Xbee.print("0 - Stop reation wheel\n");
+      Xbee.print("0 - Stop reation wheel and thrusters\n");
       Xbee.print("1 - Print Options Menu\n");
       Xbee.print("2 - Get RSSI\n");
       Xbee.print("3 - Toggle LED\n");
@@ -340,10 +362,14 @@ void process_main_menu() {
       Xbee.print("7 - Lab 7: Run Test A\n");
       Xbee.print("8 - Lab 7: Run Test B\n");
       Xbee.print("9 - Stream RW speed\n");
+      Xbee.print("10 - Lab 8: Set Thrusters Percent (-100...100)\n");
+      Xbee.print("11 - Lab 8: Thrust Sweep (bench)\n");
+      Xbee.print("12 - Lab 8: Open-Loop Thruster Slew\n");
+      Xbee.print("13 - Lab 8: RW Momentum Dump\n");
       Xbee.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Xbee.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       
-      Serial.print("0 - Stop reation wheel\n");
+      Serial.print("0 - Stop reation wheel and thrusters\n");
       Serial.print("1 - Print Options Menu\n");
       Serial.print("2 - Get RSSI\n");
       Serial.print("3 - Toggle LED\n");
@@ -353,6 +379,10 @@ void process_main_menu() {
       Serial.print("7 - Lab 7: Run Test A\n");
       Serial.print("8 - Lab 7: Run Test B\n");
       Serial.print("9 - Stream RW speed\n");
+      Serial.print("10 - Lab 8: Set Thrusters Percent (-100...100)\n");
+      Serial.print("11 - Lab 8: Thrust Sweep (bench)\n");
+      Serial.print("12 - Lab 8: Open-Loop Thruster Slew\n");
+      Serial.print("13 - Lab 8: RW Momentum Dump\n");
       Serial.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Serial.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       break;
@@ -390,6 +420,22 @@ void process_main_menu() {
 
     case 9:
       stream_RWspeed();
+      break;
+
+    case 10:
+      manual_set_thrusters();
+      break;
+
+    case 11:
+      lab8_thrust_sweep();
+      break;
+
+    case 12:
+      lab8_thruster_slew();
+      break;
+
+    case 13:
+      lab8_momentum_dump();
       break;
 
     case 98:
@@ -1219,3 +1265,370 @@ void stream_RWspeed()
   }
 } //end stream_RWspeed()
 
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// LAB 8: THRUSTERS
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+static const char *LAB8_HEADER = "mcu time(ms),gyro_Z(deg/s),mag_X(uT),mag_Y(uT),w_RW_cmd(RPM),w_RW_meas(RPM),fan_plusZ_cmd(frac),fan_minusZ_cmd(frac),phase";
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8 Helpers:
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Sends a message to both USB Serial and XBee.
+ */
+static void lab8_println(const char *msg) {
+  Serial.println(msg);
+  Xbee.println(msg);
+}
+
+/**
+ * @brief Blocks until the user sends any key, then clears both input buffers.
+ */
+static void lab8_wait_for_key() {
+  while(!Serial.available() && !Xbee.available()){}
+  delay(100); // small delay to ensure serial buffer is fully received
+  while(Serial.available()) Serial.read();
+  while(Xbee.available()) Xbee.read();
+}
+
+/**
+ * @brief Prompts the user for an integer and waits for the reply.
+ *
+ * @param msg prompt text
+ * @return integer received (0 if the reply was not a number)
+ */
+static int lab8_prompt_int(const char *msg) {
+  lab8_println(msg);
+  while(!Serial.available() && !Xbee.available()){}
+  delay(100);
+  int value = get_command_from_ground_station();
+  while(Serial.available()) Serial.read();
+  while(Xbee.available()) Xbee.read();
+  return value;
+}
+
+/**
+ * @brief Returns true if the user sent 'X' or 'x' (abort). Other characters are ignored.
+ */
+static bool lab8_abort_requested() {
+  char c = 0;
+  if (Serial.available() > 0) c = Serial.read();
+  if (Xbee.available() > 0) c = Xbee.read();
+  return (c == 'X' || c == 'x');
+}
+
+/**
+ * @brief Creates a Lab 8 data file on SD and writes the header row.
+ *
+ * @param preamble file name prefix (max 12 characters)
+ * @return true if the file was created
+ */
+static bool lab8_open_file(const char *preamble) {
+  if (!sd_createDataFile(&dataFile, preamble)) {
+    lab8_println("[ERROR] Failed to create data file. Aborting test.");
+    return false;
+  }
+  dataFile.println(LAB8_HEADER);
+  dataFile.flush();
+  char file_name[40];
+  dataFile.getName(file_name, sizeof(file_name));
+  Xbee.print("[INFO] Data file created successfully: ");
+  Xbee.println(file_name);
+  Serial.print("[INFO] Data file created successfully: ");
+  Serial.println(file_name);
+  return true;
+}
+
+/**
+ * @brief Stops all actuators and closes the data file.
+ *
+ * @param msg message to send to the ground station
+ */
+static void lab8_end_test(const char *msg) {
+  thrusters_off();
+  driver.setOutput(0);
+  dataFile.close();
+  lab8_println(msg);
+}
+
+/**
+ * @brief Reads the IMU into the gyro_Z, mag_X and mag_Y globals.
+ */
+static void lab8_read_imu() {
+  imu_sensor.getAGMT();
+  gyro_Z = imu_sensor.gyrZ();
+  mag_X = imu_sensor.magX();
+  mag_Y = imu_sensor.magY();
+}
+
+/**
+ * @brief Measures reaction wheel speed from the encoder since the last call.
+ *
+ * @return wheel speed (RPM, gearbox output shaft)
+ */
+static float lab8_measure_RW_rpm() {
+  static int64_t lastCount = 0;
+  static uint32_t timeLastEncMeas = 0;
+  uint32_t timeNow = millis();
+  int64_t c = enc.getCount();
+  float dt_s = (timeNow - timeLastEncMeas) / 1000.0f;
+  float rpm = 0.0;
+  if (dt_s > 0) {
+    float rev = (float)(c - lastCount) / ((float)CPR * 10.0);
+    rpm = (rev / dt_s) * 60.0f;
+  }
+  lastCount = c;
+  timeLastEncMeas = timeNow;
+  return rpm;
+}
+
+/**
+ * @brief Reads sensors and writes one row to the data file and USB Serial.
+ *
+ * @param time test time (ms since test start)
+ * @param rw_pwm commanded reaction wheel output (-1.0 to 1.0)
+ * @param phase test phase number (meaning depends on the test)
+ */
+static void lab8_log_row(uint32_t time, float rw_pwm, int phase) {
+  lab8_read_imu();
+  float w_RW_cmd = -rw_pwm * 1000.0 * MOTOR_VOLTAGE / 12.0; // same scaling as Lab 7
+  float w_RW_meas = lab8_measure_RW_rpm();
+
+  char row[160];
+  snprintf(row, sizeof(row), "%lu,%.3f,%.3f,%.3f,%.1f,%.1f,%.3f,%.3f,%d",
+           (unsigned long)time, gyro_Z, mag_X, mag_Y, w_RW_cmd, w_RW_meas,
+           thrusters_get_plusZ(), thrusters_get_minusZ(), phase);
+  dataFile.println(row);
+  dataFile.flush();
+  Serial.println(row);
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Manually Set Thrusters
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Prompts for a thruster command and applies it until changed or stopped (cmd 0).
+ *
+ * Positive percent runs the +Z fan, negative runs the -Z fan. Use this with cmd 9 or a
+ * gyro stream to check that each fan turns KestrelSAT the expected way.
+ */
+void manual_set_thrusters() {
+  int pct = lab8_prompt_int("Enter Thruster Percent (-100 to 100, + = +Z fan, - = -Z fan):");
+  pct = constrain(pct, -100, 100);
+  thrusters_set(pct / 100.0);
+  Serial.print("[INFO] Thrusters set to (%): ");
+  Serial.println(pct);
+  Xbee.print("[INFO] Thrusters set to (%): ");
+  Xbee.println(pct);
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Thrust Sweep
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Bench test that steps each fan through 25/50/75/100% duty to measure thrust vs. command.
+ *
+ * Mount one fan at a time on a scale (or the thruster module on a pendulum) and record the
+ * reading for each step. Each step is held 5 s with 3 s off between steps; the +Z fan runs
+ * first, then the -Z fan. Phase column = step number (0 = off).
+ */
+void lab8_thrust_sweep() {
+  const float steps[] = {0.25, 0.50, 0.75, 1.00};
+  const int n_steps = sizeof(steps) / sizeof(steps[0]);
+  const uint32_t STEP_ON_MS = 5000;
+  const uint32_t STEP_OFF_MS = 3000;
+  const uint32_t STEP_MS = STEP_ON_MS + STEP_OFF_MS;
+  const uint32_t TEST_MS = 2 * n_steps * STEP_MS;
+
+  if (!lab8_open_file("Lab8_sweep")) return;
+  lab8_println("[INFO] Ready to start thrust sweep, send any key to begin (send 'X' to abort)...");
+  lab8_wait_for_key();
+
+  neopixelWrite(RGB_BUILTIN, 255, 255, 0); // Set to yellow (R=255, G=255, B=0)
+  uint32_t t0 = millis();
+  timeNext_testPoint = t0;
+  int last_step = -1;
+  while (true) {
+    if (lab8_abort_requested()) {
+      lab8_end_test("[CAUTION] Test Canceled Early. File closed.");
+      return;
+    }
+
+    uint32_t t = millis() - t0;
+    if (t >= TEST_MS) {
+      lab8_end_test("[INFO] Thrust Sweep Complete. File closed.");
+      return;
+    }
+
+    // Set fan duty for the current step:
+    int step = t / STEP_MS;                     // 0..(2*n_steps - 1)
+    bool on = (t % STEP_MS) < STEP_ON_MS;
+    float duty = on ? steps[step % n_steps] : 0.0;
+    if (step < n_steps) {
+      thrusters_set_each(duty, 0.0);
+    } else {
+      thrusters_set_each(0.0, duty);
+    }
+    int phase = on ? step + 1 : 0;
+    if (on && step != last_step) {
+      last_step = step;
+      char msg[64];
+      snprintf(msg, sizeof(msg), "[INFO] %s fan at %d%%", step < n_steps ? "+Z" : "-Z", (int)(duty * 100));
+      lab8_println(msg);
+    }
+
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+      lab8_log_row(t, 0.0, phase);
+    }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Open-Loop Thruster Slew
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Open-loop rest-to-rest slew using the thrusters only (KestrelSAT hung by a string).
+ *
+ * Profile (phase column):
+ *  - 1: 0-2 s idle (KestrelSAT should be released and still)
+ *  - 2: +Z fan at 100% for the burn time
+ *  - 3: -Z fan at 100% for the same burn time to stop the rotation
+ *  - 4: coast with thrusters off for 10 s
+ *
+ * With equal fans, the slew angle grows with the square of the burn time. Use the Simulink
+ * model or thrust sweep data to choose the burn time for a 180 deg slew.
+ */
+void lab8_thruster_slew() {
+  int burn_s = lab8_prompt_int("Enter burn time per direction in seconds (1 to 60):");
+  burn_s = constrain(burn_s, 1, 60);
+  const uint32_t IDLE_MS = 2000;
+  const uint32_t BURN_MS = (uint32_t)burn_s * 1000;
+  const uint32_t COAST_MS = 10000;
+
+  if (!lab8_open_file("Lab8_slew")) return;
+  lab8_println("[INFO] Hang and steady KestrelSAT, then send any key to begin (send 'X' to abort)...");
+  lab8_wait_for_key();
+
+  neopixelWrite(RGB_BUILTIN, 255, 255, 255); // Set to white (R=255, G=255, B=255)
+  uint32_t t0 = millis();
+  timeNext_testPoint = t0;
+  while (true) {
+    if (lab8_abort_requested()) {
+      lab8_end_test("[CAUTION] Test Canceled Early. File closed.");
+      return;
+    }
+
+    uint32_t t = millis() - t0;
+    int phase;
+    if (t < IDLE_MS) {
+      phase = 1;
+      thrusters_off();
+    } else if (t < IDLE_MS + BURN_MS) {
+      phase = 2;
+      thrusters_set(1.0);
+    } else if (t < IDLE_MS + 2 * BURN_MS) {
+      phase = 3;
+      thrusters_set(-1.0);
+    } else if (t < IDLE_MS + 2 * BURN_MS + COAST_MS) {
+      phase = 4;
+      thrusters_off();
+    } else {
+      lab8_end_test("[INFO] Thruster Slew Complete. File closed.");
+      return;
+    }
+
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+      lab8_log_row(t, 0.0, phase);
+    }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Reaction Wheel Momentum Dump
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Spins the RW to full speed, then slows it to zero while the thrusters hold the body still.
+ *
+ * Profile (phase column):
+ *  - 1: 0-10 s hold KestrelSAT by hand while the RW spins up to 100% (LED white)
+ *  - 2: 10-13 s release KestrelSAT when the LED turns blue; RW holds full speed
+ *  - 3: RW command ramps from 100% to 0 over the ramp time; thrusters damp body rate
+ *  - 4: 15 s more of rate damping with the RW off
+ *
+ * Slowing the wheel moves its momentum into the body. The thrusters fire against the measured
+ * body rate (gyro Z) to remove that momentum: full thrust at DUMP_FULL_RATE_DPS, nothing inside
+ * DUMP_DEADBAND_DPS. This needs the +Z fan to really turn KestrelSAT +Z (check with cmd 10 first).
+ */
+void lab8_momentum_dump() {
+  const float DUMP_DEADBAND_DPS = 2.0;
+  const float DUMP_FULL_RATE_DPS = 20.0;
+  int ramp_s = lab8_prompt_int("Enter RW ramp-down time in seconds (5 to 900):");
+  ramp_s = constrain(ramp_s, 5, 900);
+  const uint32_t SPINUP_MS = 10000;
+  const uint32_t RELEASE_MS = 3000;
+  const uint32_t RAMP_MS = (uint32_t)ramp_s * 1000;
+  const uint32_t DAMP_MS = 15000;
+  const uint32_t RAMP_START = SPINUP_MS + RELEASE_MS;
+
+  if (!lab8_open_file("Lab8_dump")) return;
+  lab8_println("[INFO] Hold KestrelSAT still, then send any key to begin. Release when LED turns BLUE (send 'X' to abort)...");
+  lab8_wait_for_key();
+
+  neopixelWrite(RGB_BUILTIN, 255, 255, 255); // Set to white (R=255, G=255, B=255)
+  uint32_t t0 = millis();
+  timeNext_testPoint = t0;
+  bool released = false;
+  while (true) {
+    if (lab8_abort_requested()) {
+      lab8_end_test("[CAUTION] Test Canceled Early. File closed.");
+      return;
+    }
+
+    uint32_t t = millis() - t0;
+    int phase;
+    float rw_pwm;
+    if (t < SPINUP_MS) {
+      phase = 1;
+      rw_pwm = 1.0;
+    } else if (t < RAMP_START) {
+      phase = 2;
+      rw_pwm = 1.0;
+      if (!released) {
+        released = true;
+        neopixelWrite(RGB_BUILTIN, 0, 0, 255); // Set to blue (R=0, G=0, B=255): release KestrelSAT
+        lab8_println("[INFO] Release KestrelSAT now.");
+      }
+    } else if (t < RAMP_START + RAMP_MS) {
+      phase = 3;
+      rw_pwm = 1.0 - (float)(t - RAMP_START) / RAMP_MS;
+    } else if (t < RAMP_START + RAMP_MS + DAMP_MS) {
+      phase = 4;
+      rw_pwm = 0.0;
+    } else {
+      lab8_end_test("[INFO] Momentum Dump Complete. File closed.");
+      return;
+    }
+    driver.setOutput(rw_pwm);
+
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+
+      // Rate damping with thrusters (phases 3 and 4 only), using the latest gyro reading:
+      if (phase >= 3) {
+        float rate = gyro_Z;
+        float cmd = 0.0;
+        if (fabs(rate) > DUMP_DEADBAND_DPS) {
+          cmd = constrain(-rate / DUMP_FULL_RATE_DPS, -1.0f, 1.0f);
+        }
+        thrusters_set(cmd);
+      }
+
+      lab8_log_row(t, rw_pwm, phase);
+    }
+  }
+}

@@ -36,6 +36,7 @@ Hardware behavior can only be verified on the satellite by the team, so say what
 - `src/main.cpp`: all firmware. Has setup, loop, the ground-station command menu, and the Lab 6/7 test routines.
 - `src/sd_funcitons.cpp` + `include/sd_functions.h`: SD card helpers. The misspelled filename is intentional; leave it.
 - `include/definitions.h`: pin assignments and hardware constants.
+- `src/thrusters.cpp` + `include/thrusters.h`: fan thruster PWM driver (`thrusters_set(-1..1)`, `thrusters_set_each`, `thrusters_off`).
 - `lib/INA238-master/`: vendored INA238 current-sensor library (unused so far).
 
 ## Hardware (from `definitions.h` and `main.cpp`)
@@ -47,11 +48,11 @@ Hardware behavior can only be verified on the satellite by the team, so say what
 - XBee on `Serial2` (RX 16, TX 17) at 9600 baud. USB Serial runs at 115200.
 - SD card over SPI (CS 5).
 - Sun sensor on A0 to A3.
-- Thrusters: not yet wired. Before writing fan code, ask the team for the drive method (MOSFET or driver) and the GPIO pins. Don't guess pins.
+- Thrusters: two Pi-FAN LD3007MS fans (30 mm, 5 V, 0.20 A, 2-wire), each low-side switched by a logic-level N-MOSFET with a flyback diode. PWM on `FAN_PLUS_Z_PIN` 27 and `FAN_MINUS_Z_PIN` 4 (`src/thrusters.cpp`, LEDC at 100 Hz). Fans blow one way only: the +Z fan torques +Z, the -Z fan torques -Z. If a fan turns the sat the wrong way, swap the pin numbers in `definitions.h`.
 
 ## Firmware conventions
 
-- **Command menu**: `process_main_menu()` switches on an integer read from USB or XBee. To add a feature, add a `case`, print it in **both** menu listings (the XBee and Serial blocks), and update the command table in the file header comment. Commands in use: 0 to 9, 98, 99.
+- **Command menu**: `process_main_menu()` switches on an integer read from USB or XBee. To add a feature, add a `case`, print it in **both** menu listings (the XBee and Serial blocks), and update the command table in the file header comment. Commands in use: 0 to 13, 98, 99 (10 to 13 are Lab 8 thruster commands).
 - **Test routines** follow the `lab7_run_test_A()` pattern:
   1. `sd_createDataFile(&dataFile, "<prefix>")` (prefix up to 12 characters) and write a CSV header with units in parentheses.
   2. Wait for any key.
@@ -59,13 +60,14 @@ Hardware behavior can only be verified on the satellite by the team, so say what
   4. Log every `interval_testPoint` (50 ms) using `millis() - t0` as the time column, then `flush()` after each row.
   5. Close the file and **command actuators to zero** on both normal exit and abort.
 - Print user messages to both `Serial` and `Xbee`. Use the `[INFO]`, `[CAUTION]`, `[WARN]`, and `[ERROR]` prefixes.
-- RGB LED colors show the mode (red = startup, green = idle, orange = Lab 6, cyan = Lab 7A, magenta = Lab 7B). Give each new mode its own color.
+- RGB LED colors show the mode (red = startup, green = idle, orange = Lab 6, cyan = Lab 7A, magenta = Lab 7B, yellow = Lab 8 sweep, white = Lab 8 slew / dump hold, blue = Lab 8 dump release cue). Give each new mode its own color.
+- Lab 8 tests use the `lab8_*` helpers at the bottom of `main.cpp` (open file, log row, abort check, end test) and share one CSV format: time, gyro_Z, mag_X, mag_Y, RW cmd/meas RPM, both fan duties, phase.
 - Keep the existing Doxygen-style `/** @brief ... */` comment blocks on functions.
 - Put pins and hardware constants in `definitions.h`, not in `main.cpp`.
 
 ## Known gotchas
 
-- `setup()` blocks on `while (!Serial)`. The board will not start without USB attached. This matters for untethered (string-hung) tests.
+- `setup()` has `while (!Serial)`, but on this ESP32 board (USB-UART bridge) `Serial` is always true, so it does not block untethered boots (Lab 7 Test B ran hung over XBee).
 - `setup()` halts forever if the IMU is not found.
 - Lab 7 Test A logs `gyro_Z`, `mag_*`, and the sun values without reading the sensors inside its loop, so those columns are stale in that test.
 - Test loops are blocking, and the main menu is not serviced during a test.
