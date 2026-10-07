@@ -48,7 +48,7 @@ Hardware behavior can only be verified on the satellite by the team, so say what
 - XBee on `Serial2` (RX 16, TX 17) at 9600 baud. USB Serial runs at 115200.
 - SD card over SPI (CS 5).
 - Sun sensor on A0 to A3.
-- Thrusters: two Pi-FAN LD3007MS fans (30 mm, 5 V, 0.20 A, 2-wire), each low-side switched by a logic-level N-MOSFET with a flyback diode. PWM on `FAN_PLUS_Z_PIN` 27 and `FAN_MINUS_Z_PIN` 4 (`src/thrusters.cpp`, LEDC at 100 Hz). Fans blow one way only: the +Z fan torques +Z, the -Z fan torques -Z. If a fan turns the sat the wrong way, swap the pin numbers in `definitions.h`.
+- Thrusters: two Pi-FAN LD3007MS fans (30 mm, 5 V, 0.20 A, 2-wire), each low-side switched by a logic-level N-MOSFET with a flyback diode. PWM on `FAN_PLUS_Z_PIN` 27 and `FAN_MINUS_Z_PIN` 13 (the STAT LED pin, so command 3's LED toggle is disabled) (`src/thrusters.cpp`, LEDC at 100 Hz). Fans blow one way only: the +Z fan torques +Z, the -Z fan torques -Z. If a fan turns the sat the wrong way, swap the pin numbers in `definitions.h`.
 
 ## Firmware conventions
 

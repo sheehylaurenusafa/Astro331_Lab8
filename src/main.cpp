@@ -38,7 +38,7 @@
  * | 0   | Stop reaction wheel and thrusters |
  * | 1   | Display options menu |
  * | 2   | Query XBee RSSI |
- * | 3   | Toggle status LED |
+ * | 3   | (disabled in Lab 8: status LED pin GPIO13 drives the -Z fan) |
  * | 4   | Get battery telemetry (V, SOC, charge rate) |
  * | 5   | Manually set reaction wheel throttle (-100 to 100%) |
  * | 6   | Run Lab 6 test (Attitude Determination) |
@@ -322,7 +322,7 @@ int get_command_from_ground_station()
  * - 0: Stop reaction wheel motor
  * - 1: Print options menu
  * - 2: Get satellite RSSI
- * - 3: Toggle LED
+ * - 3: Disabled (GPIO13 status LED pin now drives the -Z fan)
  * - 4: Get battery telemetry (voltage, SOC, charge rate)
  * - 5: Manually set reaction wheel speed (throttle %)
  * - 6: Run Lab 6 - Attitude Determination test
@@ -355,7 +355,7 @@ void process_main_menu() {
       Xbee.print("0 - Stop reation wheel and thrusters\n");
       Xbee.print("1 - Print Options Menu\n");
       Xbee.print("2 - Get RSSI\n");
-      Xbee.print("3 - Toggle LED\n");
+      Xbee.print("3 - (disabled: LED pin used by -Z fan)\n");
       Xbee.print("4 - Get Battery State (V, SOC, dSOC/dt) \n");
       Xbee.print("5 - Set Motor Throttle Percent (-100...100)\n");
       Xbee.print("6 - Lab 6: Run Test\n");
@@ -372,7 +372,7 @@ void process_main_menu() {
       Serial.print("0 - Stop reation wheel and thrusters\n");
       Serial.print("1 - Print Options Menu\n");
       Serial.print("2 - Get RSSI\n");
-      Serial.print("3 - Toggle LED\n");
+      Serial.print("3 - (disabled: LED pin used by -Z fan)\n");
       Serial.print("4 - Get Battery State (V, SOC, dSOC/dt) \n");
       Serial.print("5 - Set Motor Throttle Percent (-100...100)\n");
       Serial.print("6 - Lab 6: Run Test\n");
@@ -392,10 +392,9 @@ void process_main_menu() {
       break;
 
     case 3:
-      digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-      Serial.print("LED is now ");
-      Serial.println(digitalRead(LED_BUILTIN) ? "LED ON" : "LED OFF");
-      Xbee.println(digitalRead(LED_BUILTIN) ? " LED ON" : " LED OFF");
+      // Lab 8: GPIO13 (LED_BUILTIN) now drives the -Z fan, so the LED toggle is disabled.
+      Serial.println("[CAUTION] Command 3 disabled: status LED pin (GPIO13) drives the -Z fan.");
+      Xbee.println("[CAUTION] Command 3 disabled: status LED pin (GPIO13) drives the -Z fan.");
       break;
 
     case 4:
