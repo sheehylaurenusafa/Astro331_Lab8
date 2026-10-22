@@ -49,6 +49,7 @@
  * | 11  | Lab 8: Thrust sweep (bench, each fan stepped 0-100%) |
  * | 12  | Lab 8: Open-loop thruster slew (string-hung) |
  * | 13  | Lab 8: RW momentum dump with thruster rate damping (string-hung) |
+ * | 14  | Lab 8: Data log with manual fan control ('1'/'2' toggle fans, '0' fans off, 'X' end) |
  * | 98  | SD Card: List files (USB Serial only) |
  * | 99  | SD Card: Print file menu (USB Serial only) |
  * 
@@ -59,6 +60,7 @@
  * - **Lab 8 Sweep**: each fan held 5 s at 25/50/75/100% duty with 3 s off between steps (read thrust off a scale)
  * - **Lab 8 Slew**: 2 s idle, +Z burn, equal -Z burn to stop, then coast (open loop)
  * - **Lab 8 Dump**: RW spun to full speed, release on blue LED, RW ramped to zero while thrusters damp body rate
+ * - **Lab 8 Log**: logs time, gyro Z and both fan on/off states until 'X'; fans toggled by key during the test
  * 
  * @section datalog Data Logging Format
  * All test data is logged to SD card in CSV format with:
@@ -78,7 +80,8 @@
  * @note Heartbeat signal sent every 2 seconds to indicate program status
  * @note Ground station commands checked every 10ms
  * @note RGB LED provides visual status: Red (startup), Green (idle), Orange (Lab 6), Cyan (Lab 7A), Magenta (Lab 7B),
- *       Yellow (Lab 8 sweep), White (Lab 8 slew / dump hold), Blue (Lab 8 dump: release KestrelSAT)
+ *       Yellow (Lab 8 sweep), White (Lab 8 slew / dump hold), Blue (Lab 8 dump: release KestrelSAT),
+ *       Violet (Lab 8 data log)
  * 
  * @warning All test loops use blocking serial reads; may delay program execution if waiting for input
  * @warning Reaction wheel tests should be conducted with appropriate safety precautions
@@ -151,6 +154,7 @@ void manual_set_thrusters();
 void lab8_thrust_sweep();
 void lab8_thruster_slew();
 void lab8_momentum_dump();
+void lab8_data_log();
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // SETUP:
@@ -366,6 +370,7 @@ void process_main_menu() {
       Xbee.print("11 - Lab 8: Thrust Sweep (bench)\n");
       Xbee.print("12 - Lab 8: Open-Loop Thruster Slew\n");
       Xbee.print("13 - Lab 8: RW Momentum Dump\n");
+      Xbee.print("14 - Lab 8: Data Log with Fan Control\n");
       Xbee.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Xbee.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       
@@ -383,6 +388,7 @@ void process_main_menu() {
       Serial.print("11 - Lab 8: Thrust Sweep (bench)\n");
       Serial.print("12 - Lab 8: Open-Loop Thruster Slew\n");
       Serial.print("13 - Lab 8: RW Momentum Dump\n");
+      Serial.print("14 - Lab 8: Data Log with Fan Control\n");
       Serial.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Serial.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       break;
@@ -435,6 +441,10 @@ void process_main_menu() {
 
     case 13:
       lab8_momentum_dump();
+      break;
+
+    case 14:
+      lab8_data_log();
       break;
 
     case 98:
@@ -1628,6 +1638,92 @@ void lab8_momentum_dump() {
       }
 
       lab8_log_row(t, rw_pwm, phase);
+    }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Data Log with Manual Fan Control
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Logs time, gyro Z and both fan states to a CSV on SD until the user ends the test.
+ *
+ * While logging, single keys sent over USB or XBee control the fans:
+ *  - '1': toggle the +Z fan (full on / off)
+ *  - '2': toggle the -Z fan (full on / off)
+ *  - '0': turn both fans off
+ *  - 'X' or 'x': turn both fans off, close the file and end the test
+ *
+ * Each row is also streamed to USB and XBee so the data can be watched live. The CSV opens
+ * directly in Excel. Columns: time (s), gyro Z (deg/s), +Z fan state (1 = on), -Z fan state.
+ */
+void lab8_data_log() {
+  if (!sd_createDataFile(&dataFile, "Lab8_log")) {
+    lab8_println("[ERROR] Failed to create data file. Aborting test.");
+    return;
+  }
+  dataFile.println("time(s),gyro_Z(deg/s),fan_plusZ_on,fan_minusZ_on");
+  dataFile.flush();
+  char file_name[40];
+  dataFile.getName(file_name, sizeof(file_name));
+  Xbee.print("[INFO] Data file created successfully: ");
+  Xbee.println(file_name);
+  Serial.print("[INFO] Data file created successfully: ");
+  Serial.println(file_name);
+
+  lab8_println("[INFO] Send any key to start logging. During the test: '1' = toggle +Z fan, '2' = toggle -Z fan, '0' = fans off, 'X' = end test.");
+  lab8_wait_for_key();
+  lab8_println("[INFO] Logging started.");
+
+  neopixelWrite(RGB_BUILTIN, 128, 0, 255); // Set to violet (R=128, G=0, B=255)
+  bool plusZ_on = false;
+  bool minusZ_on = false;
+  thrusters_off();
+  uint32_t t0 = millis();
+  timeNext_testPoint = t0;
+  while (true) {
+    // Check for key commands from USB or XBee:
+    int c = -1;
+    if (Serial.available() > 0) c = Serial.read();
+    else if (Xbee.available() > 0) c = Xbee.read();
+    switch (c) {
+      case '1':
+        plusZ_on = !plusZ_on;
+        lab8_println(plusZ_on ? "[INFO] +Z fan ON" : "[INFO] +Z fan OFF");
+        break;
+      case '2':
+        minusZ_on = !minusZ_on;
+        lab8_println(minusZ_on ? "[INFO] -Z fan ON" : "[INFO] -Z fan OFF");
+        break;
+      case '0':
+        plusZ_on = false;
+        minusZ_on = false;
+        lab8_println("[INFO] Both fans OFF");
+        break;
+      case 'X':
+      case 'x':
+        thrusters_off();
+        dataFile.close();
+        neopixelWrite(RGB_BUILTIN, 0, 255, 0); // Set to green (R=0, G=255, B=0)
+        lab8_println("[INFO] Data Log Complete. File closed.");
+        return;
+      default:
+        break; // ignore newlines and other characters
+    }
+    thrusters_set_each(plusZ_on ? 1.0 : 0.0, minusZ_on ? 1.0 : 0.0);
+
+    // Record test point:
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+      lab8_read_imu();
+      float time_s = (millis() - t0) / 1000.0f;
+
+      char row[64];
+      snprintf(row, sizeof(row), "%.3f,%.3f,%d,%d", time_s, gyro_Z, plusZ_on ? 1 : 0, minusZ_on ? 1 : 0);
+      dataFile.println(row);
+      dataFile.flush();
+      Serial.println(row);
+      Xbee.println(row);
     }
   }
 }
