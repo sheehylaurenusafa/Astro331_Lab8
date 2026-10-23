@@ -49,7 +49,7 @@
  * | 11  | Lab 8: Thrust sweep (bench, each fan stepped 0-100%) |
  * | 12  | Lab 8: Open-loop thruster slew (string-hung) |
  * | 13  | Lab 8: RW momentum dump with thruster rate damping (string-hung) |
- * | 14  | Lab 8: Data log with manual fan control ('1'/'2' toggle fans, '0' fans off, 'X' end) |
+ * | 14  | Lab 8: Data log (time, gyro Z, fan states, RW cmd/meas) with manual fan control ('1'/'2' toggle fans, '0' fans off, 'X' end) |
  * | 98  | SD Card: List files (USB Serial only) |
  * | 99  | SD Card: Print file menu (USB Serial only) |
  * 
@@ -134,6 +134,7 @@ uint32_t timeNext_testPoint; // time of next test point (ms)
 uint32_t interval_testPoint = 50; // time interval between test points (ms)
 
 float gyro_Z = 0.0;
+float rw_cmd_pwm = 0.0; // last RW output set from the menu (cmd 5) or cleared by cmd 0 (-1.0 to 1.0)
 float mag_X = 0.0;
 float mag_Y = 0.0;
 
@@ -350,6 +351,7 @@ void process_main_menu() {
   switch (received_int) {
     case 0:
       driver.setOutput(0);
+      rw_cmd_pwm = 0.0;
       thrusters_off();
       Xbee.println("Motor and Thrusters Stopped.");
       Serial.println("Motor and Thrusters Stopped.");
@@ -605,6 +607,7 @@ void manual_set_RW_speed(){
   delay(500);
 
   driver.setOutput(rw_speed);
+  rw_cmd_pwm = rw_speed;
 
   while(Serial.available()) Serial.read(); // clear serial buffer
   while(Xbee.available()) Xbee.read(); // clear Xbee buffer
@@ -1359,6 +1362,7 @@ static bool lab8_open_file(const char *preamble) {
 static void lab8_end_test(const char *msg) {
   thrusters_off();
   driver.setOutput(0);
+  rw_cmd_pwm = 0.0;
   dataFile.close();
   lab8_println(msg);
 }
@@ -1646,7 +1650,7 @@ void lab8_momentum_dump() {
 // Lab 8: Data Log with Manual Fan Control
 /*---------------------------------------------------------------------------------------------*/
 /**
- * @brief Logs time, gyro Z and both fan states to a CSV on SD until the user ends the test.
+ * @brief Logs time, gyro Z, both fan states and RW speed to a CSV on SD until the user ends the test.
  *
  * While logging, single keys sent over USB or XBee control the fans:
  *  - '1': toggle the +Z fan (full on / off)
@@ -1655,14 +1659,16 @@ void lab8_momentum_dump() {
  *  - 'X' or 'x': turn both fans off, close the file and end the test
  *
  * Each row is also streamed to USB and XBee so the data can be watched live. The CSV opens
- * directly in Excel. Columns: time (s), gyro Z (deg/s), +Z fan state (1 = on), -Z fan state.
+ * directly in Excel. Columns: time (s), gyro Z (deg/s), +Z fan state (1 = on), -Z fan state,
+ * RW commanded speed (RPM, set with cmd 5 before the test; same scaling as Lab 7) and RW measured
+ * speed (RPM, from the encoder). The RW is not changed by this test.
  */
 void lab8_data_log() {
   if (!sd_createDataFile(&dataFile, "Lab8_log")) {
     lab8_println("[ERROR] Failed to create data file. Aborting test.");
     return;
   }
-  dataFile.println("time(s),gyro_Z(deg/s),fan_plusZ_on,fan_minusZ_on");
+  dataFile.println("time(s),gyro_Z(deg/s),fan_plusZ_on,fan_minusZ_on,w_RW_cmd(RPM),w_RW_meas(RPM)");
   dataFile.flush();
   char file_name[40];
   dataFile.getName(file_name, sizeof(file_name));
@@ -1717,9 +1723,12 @@ void lab8_data_log() {
       timeNext_testPoint += interval_testPoint;
       lab8_read_imu();
       float time_s = (millis() - t0) / 1000.0f;
+      float w_RW_cmd = -rw_cmd_pwm * 1000.0 * MOTOR_VOLTAGE / 12.0; // same scaling as Lab 7
+      float w_RW_meas = lab8_measure_RW_rpm();
 
-      char row[64];
-      snprintf(row, sizeof(row), "%.3f,%.3f,%d,%d", time_s, gyro_Z, plusZ_on ? 1 : 0, minusZ_on ? 1 : 0);
+      char row[96];
+      snprintf(row, sizeof(row), "%.3f,%.3f,%d,%d,%.1f,%.1f", time_s, gyro_Z, plusZ_on ? 1 : 0, minusZ_on ? 1 : 0,
+               w_RW_cmd, w_RW_meas);
       dataFile.println(row);
       dataFile.flush();
       Serial.println(row);
