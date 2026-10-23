@@ -167,10 +167,24 @@ void setup() {
 
   Wire.begin(); // Initialize I2C communication
 
-  // Initialize built-in RGB LED (WS2812) and STAT LED
-  // #define RGB_BUILTIN  2
+  //----------------------------------------------
+  // Initialize Reaction Wheel (first, so the wheel is stopped even if a later step halts setup)
+  //----------------------------------------------
+  driver.enable(); // TB9051FTG Motor Driver
+  driver.setOutput(0);
+  enc.attachFullQuad(ENCODER_PIN_A, ENCODER_PIN_B); // Motor Encoder
+  enc.clearCount();
+  //----------------------------------------------
+
+  //----------------------------------------------
+  // Initialize Thrusters
+  //----------------------------------------------
+  thrusters_init();
+  //----------------------------------------------
+
+  // Initialize built-in RGB LED (WS2812). The STAT LED pin (GPIO13) drives the -Z fan, so it is
+  // set up by thrusters_init() above and must not be reset with pinMode() here.
   pinMode(RGB_BUILTIN, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
   neopixelWrite(RGB_BUILTIN, 255, 0, 0); // Default to red (R=255, G=0, B=0)
 
   //----------------------------------------------
@@ -222,21 +236,6 @@ void setup() {
   // Initialize Sun Sensor
   //----------------------------------------------
   analogReadResolution(12);
-
-  //----------------------------------------------
-  // Initialize Reaction Wheel
-  //----------------------------------------------
-  driver.enable(); // TB9051FTG Motor Driver
-  driver.setOutput(0);
-  enc.attachFullQuad(ENCODER_PIN_A, ENCODER_PIN_B); // Motor Encoder
-  enc.clearCount();
-  //----------------------------------------------
-
-  //----------------------------------------------
-  // Initialize Thrusters
-  //----------------------------------------------
-  thrusters_init();
-  //----------------------------------------------
 
   Serial.println("[INFO] SETUP COMPLETE.");
   Xbee.println("[INFO] SETUP COMPLETE.SEND '1' FOR OPTIONS.");
