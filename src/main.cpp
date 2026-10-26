@@ -50,6 +50,7 @@
  * | 12  | Lab 8: Open-loop thruster slew (string-hung) |
  * | 13  | Lab 8: RW momentum dump with thruster rate damping (string-hung) |
  * | 14  | Lab 8: Data log (time, gyro Z, mag X/Y, fan states, RW cmd/meas) with manual fan control ('1'/'2' toggle fans, '0' fans off, 'X' end) |
+ * | 15  | Lab 8: Closed-loop heading hold on integrated gyro ('Z' re-zero target, 'X' end) |
  * | 98  | SD Card: List files (USB Serial only) |
  * | 99  | SD Card: Print file menu (USB Serial only) |
  * 
@@ -61,6 +62,7 @@
  * - **Lab 8 Slew**: 2 s idle, +Z burn, equal -Z burn to stop, then coast (open loop)
  * - **Lab 8 Dump**: RW spun to full speed, release on blue LED, RW ramped to zero while thrusters damp body rate
  * - **Lab 8 Log**: logs time, gyro Z and both fan on/off states until 'X'; fans toggled by key during the test
+ * - **Lab 8 Hold**: measures gyro bias, then fires thrusters to hold the starting heading (integrated gyro) until 'X'
  * 
  * @section datalog Data Logging Format
  * All test data is logged to SD card in CSV format with:
@@ -81,7 +83,7 @@
  * @note Ground station commands checked every 10ms
  * @note RGB LED provides visual status: Red (startup), Green (idle), Orange (Lab 6), Cyan (Lab 7A), Magenta (Lab 7B),
  *       Yellow (Lab 8 sweep), White (Lab 8 slew / dump hold), Blue (Lab 8 dump: release KestrelSAT),
- *       Violet (Lab 8 data log)
+ *       Violet (Lab 8 data log), Azure (Lab 8 heading hold)
  * 
  * @warning All test loops use blocking serial reads; may delay program execution if waiting for input
  * @warning Reaction wheel tests should be conducted with appropriate safety precautions
@@ -156,6 +158,7 @@ void lab8_thrust_sweep();
 void lab8_thruster_slew();
 void lab8_momentum_dump();
 void lab8_data_log();
+void lab8_heading_hold();
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // SETUP:
@@ -372,6 +375,7 @@ void process_main_menu() {
       Xbee.print("12 - Lab 8: Open-Loop Thruster Slew\n");
       Xbee.print("13 - Lab 8: RW Momentum Dump\n");
       Xbee.print("14 - Lab 8: Data Log with Fan Control\n");
+      Xbee.print("15 - Lab 8: Closed-Loop Heading Hold\n");
       Xbee.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Xbee.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       
@@ -390,6 +394,7 @@ void process_main_menu() {
       Serial.print("12 - Lab 8: Open-Loop Thruster Slew\n");
       Serial.print("13 - Lab 8: RW Momentum Dump\n");
       Serial.print("14 - Lab 8: Data Log with Fan Control\n");
+      Serial.print("15 - Lab 8: Closed-Loop Heading Hold\n");
       Serial.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Serial.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       break;
@@ -446,6 +451,10 @@ void process_main_menu() {
 
     case 14:
       lab8_data_log();
+      break;
+
+    case 15:
+      lab8_heading_hold();
       break;
 
     case 98:
@@ -1735,6 +1744,128 @@ void lab8_data_log() {
       // The SD file and USB stream still get every row.
       static uint32_t xbee_row_count = 0;
       if (xbee_row_count++ % 4 == 0) Xbee.println(row);
+    }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Closed-Loop Heading Hold
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Wraps an angle to the range -180 to +180 deg.
+ */
+static float lab8_wrap180(float deg) {
+  while (deg > 180.0f) deg -= 360.0f;
+  while (deg < -180.0f) deg += 360.0f;
+  return deg;
+}
+
+/**
+ * @brief Holds KestrelSAT at its starting heading using the thrusters and integrated gyro heading.
+ *
+ * Steps:
+ *  1. Hold KestrelSAT still for HOLD_BIAS_CAL_MS while the gyro bias is averaged (LED white).
+ *  2. The current heading becomes the target (0 deg). LED turns azure and the loop starts.
+ *  3. Every loop: heading += (gyro_Z - bias) * dt. The controller predicts the stopping error
+ *       u = error - rate*|rate| / (2*HOLD_ALPHA_DPS2) - rate*HOLD_FAN_LAG_S
+ *     and fires the +Z fan if u > HOLD_DEADBAND_ON_DEG, the -Z fan if u < -HOLD_DEADBAND_ON_DEG,
+ *     and turns the fan off once |u| < HOLD_DEADBAND_OFF_DEG (hysteresis stops chatter).
+ *
+ * Keys during the test: 'Z' re-zeros the target to the current heading, 'X' ends the test.
+ * Assumes the +Z fan makes gyro_Z positive (check with cmd 14: press '1', gyro_Z should go up).
+ * Logs to SD every 50 ms: time, gyro Z, heading, error, prediction u, mag X/Y, fan states.
+ */
+void lab8_heading_hold() {
+  if (!sd_createDataFile(&dataFile, "Lab8_hold")) {
+    lab8_println("[ERROR] Failed to create data file. Aborting test.");
+    return;
+  }
+  dataFile.println("time(s),gyro_Z(deg/s),heading(deg),error(deg),u_pred(deg),mag_X(uT),mag_Y(uT),fan_plusZ_on,fan_minusZ_on");
+  dataFile.flush();
+  char file_name[40];
+  dataFile.getName(file_name, sizeof(file_name));
+  Xbee.print("[INFO] Data file created successfully: ");
+  Xbee.println(file_name);
+  Serial.print("[INFO] Data file created successfully: ");
+  Serial.println(file_name);
+
+  lab8_println("[INFO] Hold KestrelSAT still and send any key to measure gyro bias. During the test: 'Z' = re-zero target, 'X' = end.");
+  lab8_wait_for_key();
+  thrusters_off();
+
+  // 1. Gyro bias calibration:
+  neopixelWrite(RGB_BUILTIN, 255, 255, 255); // Set to white (R=255, G=255, B=255)
+  float bias_sum = 0.0;
+  uint32_t n_bias = 0;
+  uint32_t t_cal = millis();
+  while (millis() - t_cal < HOLD_BIAS_CAL_MS) {
+    lab8_read_imu();
+    bias_sum += gyro_Z;
+    n_bias++;
+    delay(5);
+  }
+  float bias = (n_bias > 0) ? bias_sum / n_bias : 0.0;
+  char msg[96];
+  snprintf(msg, sizeof(msg), "[INFO] Gyro bias = %.3f deg/s. Holding heading now; release KestrelSAT.", bias);
+  lab8_println(msg);
+
+  // 2. Hold loop:
+  neopixelWrite(RGB_BUILTIN, 0, 128, 255); // Set to azure (R=0, G=128, B=255)
+  float heading = 0.0;   // integrated heading relative to start (deg, unwrapped)
+  float target = 0.0;    // target heading (deg)
+  int fan_state = 0;     // +1 = +Z fan on, -1 = -Z fan on, 0 = off
+  uint32_t t0 = millis();
+  uint32_t t_prev_us = micros();
+  timeNext_testPoint = t0;
+  uint32_t xbee_row_count = 0;
+  while (true) {
+    // Key commands:
+    int c = -1;
+    if (Serial.available() > 0) c = Serial.read();
+    else if (Xbee.available() > 0) c = Xbee.read();
+    if (c == 'X' || c == 'x') {
+      thrusters_off();
+      dataFile.close();
+      neopixelWrite(RGB_BUILTIN, 0, 255, 0); // Set to green (R=0, G=255, B=0)
+      lab8_println("[INFO] Heading Hold Complete. File closed.");
+      return;
+    }
+    if (c == 'Z' || c == 'z') {
+      target = heading;
+      lab8_println("[INFO] Target re-zeroed to current heading.");
+    }
+
+    // Integrate gyro heading:
+    lab8_read_imu();
+    uint32_t t_now_us = micros();
+    float dt = (t_now_us - t_prev_us) / 1.0e6f;
+    t_prev_us = t_now_us;
+    float rate = gyro_Z - bias;
+    heading += rate * dt;
+
+    // Bang-bang control on predicted stopping error:
+    float error = lab8_wrap180(target - heading);
+    float u = error - rate * fabs(rate) / (2.0f * HOLD_ALPHA_DPS2) - rate * HOLD_FAN_LAG_S;
+    if (u > HOLD_DEADBAND_ON_DEG) {
+      fan_state = 1;
+    } else if (u < -HOLD_DEADBAND_ON_DEG) {
+      fan_state = -1;
+    } else if (fabs(u) < HOLD_DEADBAND_OFF_DEG) {
+      fan_state = 0;
+    }
+    thrusters_set((float)fan_state);
+
+    // Record test point:
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+      float time_s = (millis() - t0) / 1000.0f;
+      char row[128];
+      snprintf(row, sizeof(row), "%.3f,%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d", time_s, rate, heading, error, u,
+               mag_X, mag_Y, fan_state > 0 ? 1 : 0, fan_state < 0 ? 1 : 0);
+      dataFile.println(row);
+      dataFile.flush();
+      Serial.println(row);
+      if (xbee_row_count++ % 4 == 0) Xbee.println(row); // XBee gets every 4th row (5 Hz)
     }
   }
 }

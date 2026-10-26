@@ -32,3 +32,12 @@
 #define FAN_PWM_FREQ_HZ         100    // low PWM frequency suits 2-wire brushless fans switched on their supply
 #define FAN_PWM_RES_BITS        10     // PWM duty resolution (0-1023)
 #define FAN_MIN_DUTY            0.0    // duty below which a fan stalls; set from thrust sweep (cmd 11) data
+
+// Heading hold (cmd 15): bang-bang thruster control on gyro-integrated heading.
+// The controller predicts where KestrelSAT will stop if it brakes now and fires the fan that
+// drives that predicted error to zero. Tune these from command 14 data.
+#define HOLD_ALPHA_DPS2         0.5    // angular accel from one fan (deg/s^2); slope of gyro_Z while one fan is on
+#define HOLD_FAN_LAG_S          0.5    // fan spin-up delay (s); extra lead added to braking
+#define HOLD_DEADBAND_ON_DEG    2.0    // fire a fan when predicted error exceeds this (deg)
+#define HOLD_DEADBAND_OFF_DEG   0.5    // turn the fan off when predicted error falls below this (deg)
+#define HOLD_BIAS_CAL_MS        3000   // time KestrelSAT is held still to measure gyro bias (ms)
