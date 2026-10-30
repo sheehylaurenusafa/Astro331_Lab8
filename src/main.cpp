@@ -51,6 +51,7 @@
  * | 13  | Lab 8: RW momentum dump with thruster rate damping (string-hung) |
  * | 14  | Lab 8: Data log (time, gyro Z, mag X/Y, fan states, RW cmd/meas) with manual fan control ('1'/'2' toggle fans, '0' fans off, 'X' end) |
  * | 15  | Lab 8: Closed-loop heading hold on integrated gyro ('Z' re-zero target, 'X' end) |
+ * | 16  | Lab 8: Closed-loop heading hold on magnetometer heading ('Z' re-zero target, 'X' end) |
  * | 98  | SD Card: List files (USB Serial only) |
  * | 99  | SD Card: Print file menu (USB Serial only) |
  * 
@@ -63,6 +64,7 @@
  * - **Lab 8 Dump**: RW spun to full speed, release on blue LED, RW ramped to zero while thrusters damp body rate
  * - **Lab 8 Log**: logs time, gyro Z and both fan on/off states until 'X'; fans toggled by key during the test
  * - **Lab 8 Hold**: measures gyro bias, then fires thrusters to hold the starting heading (integrated gyro) until 'X'
+ * - **Lab 8 Mag Hold**: optional magnetometer calibration spin, then fires thrusters to hold the starting magnetic heading until 'X'
  * 
  * @section datalog Data Logging Format
  * All test data is logged to SD card in CSV format with:
@@ -159,6 +161,7 @@ void lab8_thruster_slew();
 void lab8_momentum_dump();
 void lab8_data_log();
 void lab8_heading_hold();
+void lab8_mag_heading_hold();
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // SETUP:
@@ -376,6 +379,7 @@ void process_main_menu() {
       Xbee.print("13 - Lab 8: RW Momentum Dump\n");
       Xbee.print("14 - Lab 8: Data Log with Fan Control\n");
       Xbee.print("15 - Lab 8: Closed-Loop Heading Hold\n");
+      Xbee.print("16 - Lab 8: Closed-Loop Magnetic Heading Hold\n");
       Xbee.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Xbee.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       
@@ -395,6 +399,7 @@ void process_main_menu() {
       Serial.print("13 - Lab 8: RW Momentum Dump\n");
       Serial.print("14 - Lab 8: Data Log with Fan Control\n");
       Serial.print("15 - Lab 8: Closed-Loop Heading Hold\n");
+      Serial.print("16 - Lab 8: Closed-Loop Magnetic Heading Hold\n");
       Serial.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Serial.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       break;
@@ -455,6 +460,10 @@ void process_main_menu() {
 
     case 15:
       lab8_heading_hold();
+      break;
+
+    case 16:
+      lab8_mag_heading_hold();
       break;
 
     case 98:
@@ -1761,6 +1770,28 @@ static float lab8_wrap180(float deg) {
 }
 
 /**
+ * @brief Bang-bang thruster decision on the predicted stopping error (shared by cmds 15 and 16).
+ *
+ * @param error     heading error target - heading (deg), in the gyro_Z sign convention
+ * @param rate      body rate gyro_Z - bias (deg/s)
+ * @param fan_state previous fan state (+1 = +Z fan, -1 = -Z fan, 0 = off)
+ * @param u_out     returns the predicted stopping error u (deg)
+ * @return new fan state
+ */
+static int lab8_hold_fan_state(float error, float rate, int fan_state, float *u_out) {
+  float u = error - rate * fabs(rate) / (2.0f * HOLD_ALPHA_DPS2) - rate * HOLD_FAN_LAG_S;
+  if (u > HOLD_DEADBAND_ON_DEG) {
+    fan_state = 1;
+  } else if (u < -HOLD_DEADBAND_ON_DEG) {
+    fan_state = -1;
+  } else if (fabs(u) < HOLD_DEADBAND_OFF_DEG) {
+    fan_state = 0;
+  }
+  *u_out = u;
+  return fan_state;
+}
+
+/**
  * @brief Holds KestrelSAT at its starting heading using the thrusters and integrated gyro heading.
  *
  * Steps:
@@ -1845,14 +1876,8 @@ void lab8_heading_hold() {
 
     // Bang-bang control on predicted stopping error:
     float error = lab8_wrap180(target - heading);
-    float u = error - rate * fabs(rate) / (2.0f * HOLD_ALPHA_DPS2) - rate * HOLD_FAN_LAG_S;
-    if (u > HOLD_DEADBAND_ON_DEG) {
-      fan_state = 1;
-    } else if (u < -HOLD_DEADBAND_ON_DEG) {
-      fan_state = -1;
-    } else if (fabs(u) < HOLD_DEADBAND_OFF_DEG) {
-      fan_state = 0;
-    }
+    float u;
+    fan_state = lab8_hold_fan_state(error, rate, fan_state, &u);
     thrusters_set((float)fan_state);
 
     // Record test point:
@@ -1861,6 +1886,168 @@ void lab8_heading_hold() {
       float time_s = (millis() - t0) / 1000.0f;
       char row[128];
       snprintf(row, sizeof(row), "%.3f,%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d", time_s, rate, heading, error, u,
+               mag_X, mag_Y, fan_state > 0 ? 1 : 0, fan_state < 0 ? 1 : 0);
+      dataFile.println(row);
+      dataFile.flush();
+      Serial.println(row);
+      if (xbee_row_count++ % 4 == 0) Xbee.println(row); // XBee gets every 4th row (5 Hz)
+    }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Closed-Loop Magnetic Heading Hold
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Magnetic heading (deg, 0-360) from mag X/Y with hard-iron offsets removed.
+ *
+ * Same formula as the team's MATLAB: atan2d(magX - offX, magY - offY), wrapped to 0-360.
+ */
+static float lab8_mag_heading(float mx, float my, float off_x, float off_y) {
+  float h = atan2f(mx - off_x, my - off_y) * (180.0f / (float)M_PI);
+  if (h < 0.0f) h += 360.0f;
+  return h;
+}
+
+/**
+ * @brief Holds KestrelSAT at its starting magnetic heading using the thrusters.
+ *
+ * Same controller as cmd 15, but the heading comes from the magnetometer instead of the integrated gyro,
+ * so it does not drift. The gyro is still used for the rate (braking) term because it is far less noisy.
+ *
+ * Steps:
+ *  1. Optional magnetometer calibration: send 'C', turn KestrelSAT slowly through at least one full
+ *     turn, then send any key. Offsets = (max + min) / 2 of mag X and Y. Any other key uses
+ *     MAG_OFFSET_X_UT / MAG_OFFSET_Y_UT from definitions.h. The offsets are printed so they can be saved there.
+ *  2. Hold KestrelSAT still for HOLD_BIAS_CAL_MS (LED white): gyro bias and mag X/Y are averaged,
+ *     and the averaged magnetic heading becomes the target.
+ *  3. Hold loop (LED rose): mag X/Y are low-pass filtered (time constant MAG_FILTER_TAU_S), the heading is
+ *     computed, error = wrap180(target - heading) is converted to the gyro sign with MAG_HEADING_SIGN,
+ *     and the cmd 15 bang-bang controller picks the fan.
+ *
+ * Keys during the test: 'Z' re-zeros the target to the current magnetic heading, 'X' ends the test.
+ * If KestrelSAT turns away from the target instead of back to it, flip MAG_HEADING_SIGN in definitions.h.
+ * Logs to SD every 50 ms: time, gyro Z, mag heading, target, error, prediction u, mag X/Y, fan states.
+ */
+void lab8_mag_heading_hold() {
+  if (!sd_createDataFile(&dataFile, "Lab8_maghold")) {
+    lab8_println("[ERROR] Failed to create data file. Aborting test.");
+    return;
+  }
+  dataFile.println("time(s),gyro_Z(deg/s),mag_heading(deg),target(deg),error(deg),u_pred(deg),mag_X(uT),mag_Y(uT),fan_plusZ_on,fan_minusZ_on");
+  dataFile.flush();
+  char file_name[40];
+  dataFile.getName(file_name, sizeof(file_name));
+  Xbee.print("[INFO] Data file created successfully: ");
+  Xbee.println(file_name);
+  Serial.print("[INFO] Data file created successfully: ");
+  Serial.println(file_name);
+  thrusters_off();
+
+  // 1. Optional magnetometer calibration spin:
+  float off_x = MAG_OFFSET_X_UT;
+  float off_y = MAG_OFFSET_Y_UT;
+  lab8_println("[INFO] Send 'C' to calibrate the magnetometer, or any other key to use the saved offsets.");
+  while (!Serial.available() && !Xbee.available()) {}
+  int c = Serial.available() ? Serial.read() : Xbee.read();
+  delay(100);
+  while (Serial.available()) Serial.read();
+  while (Xbee.available()) Xbee.read();
+  char msg[128];
+  if (c == 'C' || c == 'c') {
+    lab8_println("[INFO] Turn KestrelSAT slowly through at least one full turn, then send any key.");
+    neopixelWrite(RGB_BUILTIN, 255, 255, 0); // Set to yellow (R=255, G=255, B=0) while calibrating
+    lab8_read_imu();
+    float x_min = mag_X, x_max = mag_X, y_min = mag_Y, y_max = mag_Y;
+    while (!Serial.available() && !Xbee.available()) {
+      lab8_read_imu();
+      x_min = fminf(x_min, mag_X); x_max = fmaxf(x_max, mag_X);
+      y_min = fminf(y_min, mag_Y); y_max = fmaxf(y_max, mag_Y);
+      delay(10);
+    }
+    delay(100);
+    while (Serial.available()) Serial.read();
+    while (Xbee.available()) Xbee.read();
+    off_x = 0.5f * (x_max + x_min);
+    off_y = 0.5f * (y_max + y_min);
+    snprintf(msg, sizeof(msg), "[INFO] Mag offsets: X = %.2f uT, Y = %.2f uT (save in definitions.h as MAG_OFFSET_X_UT/Y_UT).", off_x, off_y);
+    lab8_println(msg);
+  } else {
+    snprintf(msg, sizeof(msg), "[INFO] Using saved mag offsets: X = %.2f uT, Y = %.2f uT.", off_x, off_y);
+    lab8_println(msg);
+  }
+
+  lab8_println("[INFO] Point KestrelSAT at the heading to hold, hold it still and send any key. During the test: 'Z' = re-zero target, 'X' = end.");
+  lab8_wait_for_key();
+
+  // 2. Gyro bias and starting heading:
+  neopixelWrite(RGB_BUILTIN, 255, 255, 255); // Set to white (R=255, G=255, B=255)
+  float bias_sum = 0.0, mx_sum = 0.0, my_sum = 0.0;
+  uint32_t n_cal = 0;
+  uint32_t t_cal = millis();
+  while (millis() - t_cal < HOLD_BIAS_CAL_MS) {
+    lab8_read_imu();
+    bias_sum += gyro_Z;
+    mx_sum += mag_X;
+    my_sum += mag_Y;
+    n_cal++;
+    delay(5);
+  }
+  float bias = (n_cal > 0) ? bias_sum / n_cal : 0.0;
+  float mx_f = (n_cal > 0) ? mx_sum / n_cal : mag_X; // filtered mag X/Y, start at the averages
+  float my_f = (n_cal > 0) ? my_sum / n_cal : mag_Y;
+  float heading = lab8_mag_heading(mx_f, my_f, off_x, off_y);
+  float target = heading;
+  snprintf(msg, sizeof(msg), "[INFO] Gyro bias = %.3f deg/s, target heading = %.1f deg. Holding now; release KestrelSAT.", bias, target);
+  lab8_println(msg);
+
+  // 3. Hold loop:
+  neopixelWrite(RGB_BUILTIN, 255, 0, 128); // Set to rose (R=255, G=0, B=128)
+  int fan_state = 0;     // +1 = +Z fan on, -1 = -Z fan on, 0 = off
+  uint32_t t0 = millis();
+  uint32_t t_prev_us = micros();
+  timeNext_testPoint = t0;
+  uint32_t xbee_row_count = 0;
+  while (true) {
+    // Key commands:
+    c = -1;
+    if (Serial.available() > 0) c = Serial.read();
+    else if (Xbee.available() > 0) c = Xbee.read();
+    if (c == 'X' || c == 'x') {
+      thrusters_off();
+      dataFile.close();
+      neopixelWrite(RGB_BUILTIN, 0, 255, 0); // Set to green (R=0, G=255, B=0)
+      lab8_println("[INFO] Magnetic Heading Hold Complete. File closed.");
+      return;
+    }
+    if (c == 'Z' || c == 'z') {
+      target = heading;
+      lab8_println("[INFO] Target re-zeroed to current magnetic heading.");
+    }
+
+    // Filtered magnetic heading:
+    lab8_read_imu();
+    uint32_t t_now_us = micros();
+    float dt = (t_now_us - t_prev_us) / 1.0e6f;
+    t_prev_us = t_now_us;
+    float a = dt / (MAG_FILTER_TAU_S + dt);
+    mx_f += a * (mag_X - mx_f);
+    my_f += a * (mag_Y - my_f);
+    heading = lab8_mag_heading(mx_f, my_f, off_x, off_y);
+    float rate = gyro_Z - bias;
+
+    // Bang-bang control, with the magnetic error converted to the gyro_Z sign:
+    float error = lab8_wrap180(target - heading);
+    float u;
+    fan_state = lab8_hold_fan_state(MAG_HEADING_SIGN * error, rate, fan_state, &u);
+    thrusters_set((float)fan_state);
+
+    // Record test point:
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+      float time_s = (millis() - t0) / 1000.0f;
+      char row[144];
+      snprintf(row, sizeof(row), "%.3f,%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d", time_s, rate, heading, target, error, u,
                mag_X, mag_Y, fan_state > 0 ? 1 : 0, fan_state < 0 ? 1 : 0);
       dataFile.println(row);
       dataFile.flush();

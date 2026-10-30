@@ -41,3 +41,9 @@
 #define HOLD_DEADBAND_ON_DEG    2.0    // fire a fan when predicted error exceeds this (deg)
 #define HOLD_DEADBAND_OFF_DEG   0.5    // turn the fan off when predicted error falls below this (deg)
 #define HOLD_BIAS_CAL_MS        3000   // time KestrelSAT is held still to measure gyro bias (ms)
+
+// Magnetic heading hold (cmd 16): same controller as cmd 15, heading from the magnetometer.
+#define MAG_OFFSET_X_UT         0.0    // hard-iron offset of mag X (uT); cmd 16 'C' calibration prints this, or use (max+min)/2 from a full-turn log
+#define MAG_OFFSET_Y_UT         0.0    // hard-iron offset of mag Y (uT)
+#define MAG_FILTER_TAU_S        0.2    // low-pass time constant on mag X/Y (s); larger = smoother but more lag
+#define MAG_HEADING_SIGN        -1.0   // +1 if mag heading increases when gyro_Z is positive, -1 if it decreases (team MATLAB shows -1)
