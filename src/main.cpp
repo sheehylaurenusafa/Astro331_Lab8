@@ -8,6 +8,7 @@
  * - Ground station command interface via XBee radio and USB Serial
  * - Battery telemetry monitoring via MAX17048 fuel gauge
  * - Data logging to SD card for Lab 6 and Lab 7 experiments
+ * - Lab 8 fan thrusters: manual control, thrust sweep, open-loop slew, RW momentum dump
  * 
  * @author Lt Col Wyatt Harris
  * @date Spring 2026
@@ -34,15 +35,23 @@
  * @section commands Ground Station Commands
  * | Cmd | Function |
  * |-----|----------|
- * | 0   | Stop reaction wheel |
+ * | 0   | Stop reaction wheel and thrusters |
  * | 1   | Display options menu |
  * | 2   | Query XBee RSSI |
- * | 3   | Toggle status LED |
+ * | 3   | (disabled in Lab 8: status LED pin GPIO13 drives the -Z fan) |
  * | 4   | Get battery telemetry (V, SOC, charge rate) |
  * | 5   | Manually set reaction wheel throttle (-100 to 100%) |
  * | 6   | Run Lab 6 test (Attitude Determination) |
  * | 7   | Run Lab 7 Test A (tabletop static, RW torque measurement) |
  * | 8   | Run Lab 7 Test B (dynamic test with prescribed wheel speed) |
+ * | 9   | Stream reaction wheel speed |
+ * | 10  | Lab 8: Manually set thrusters (-100 to 100%, + = +Z fan, - = -Z fan) |
+ * | 11  | Lab 8: Thrust sweep (bench, each fan stepped 0-100%) |
+ * | 12  | Lab 8: Open-loop thruster slew (string-hung) |
+ * | 13  | Lab 8: RW momentum dump with thruster rate damping (string-hung) |
+ * | 14  | Lab 8: Data log (time, gyro Z, mag X/Y, fan states, RW cmd/meas) with manual fan control ('1'/'2' toggle fans, '0' fans off, 'X' end) |
+ * | 15  | Lab 8: Closed-loop heading hold on integrated gyro ('Z' re-zero target, 'X' end) |
+ * | 16  | Lab 8: Closed-loop heading hold on magnetometer heading ('Z' re-zero target, 'X' end) |
  * | 98  | SD Card: List files (USB Serial only) |
  * | 99  | SD Card: Print file menu (USB Serial only) |
  * 
@@ -50,6 +59,12 @@
  * - **Lab 6**: Collects IMU (gyro Z, mag X/Y) and sun sensor data at 50ms intervals
  * - **Lab 7A**: 15-second tabletop test with 100% motor step input from 3-10 seconds
  * - **Lab 7B**: 50-second dynamic test with prescribed motor speed profile (hold, ramp up/down cycles)
+ * - **Lab 8 Sweep**: each fan held 5 s at 25/50/75/100% duty with 3 s off between steps (read thrust off a scale)
+ * - **Lab 8 Slew**: 2 s idle, +Z burn, equal -Z burn to stop, then coast (open loop)
+ * - **Lab 8 Dump**: RW spun to full speed, release on blue LED, RW ramped to zero while thrusters damp body rate
+ * - **Lab 8 Log**: logs time, gyro Z and both fan on/off states until 'X'; fans toggled by key during the test
+ * - **Lab 8 Hold**: measures gyro bias, then fires thrusters to hold the starting heading (integrated gyro) until 'X'
+ * - **Lab 8 Mag Hold**: optional magnetometer calibration spin, then fires thrusters to hold the starting magnetic heading until 'X'
  * 
  * @section datalog Data Logging Format
  * All test data is logged to SD card in CSV format with:
@@ -68,7 +83,9 @@
  * 
  * @note Heartbeat signal sent every 2 seconds to indicate program status
  * @note Ground station commands checked every 10ms
- * @note RGB LED provides visual status: Red (startup), Green (idle), Orange (Lab 6), Cyan (Lab 7A), Magenta (Lab 7B)
+ * @note RGB LED provides visual status: Red (startup), Green (idle), Orange (Lab 6), Cyan (Lab 7A), Magenta (Lab 7B),
+ *       Yellow (Lab 8 sweep), White (Lab 8 slew / dump hold), Blue (Lab 8 dump: release KestrelSAT),
+ *       Violet (Lab 8 data log), Azure (Lab 8 heading hold)
  * 
  * @warning All test loops use blocking serial reads; may delay program execution if waiting for input
  * @warning Reaction wheel tests should be conducted with appropriate safety precautions
@@ -90,6 +107,7 @@
 #include <ICM_20948.h>                                    // Sparkfun IMU library
 #include <TB9051FTGMotorCarrier.h>                        // Pololu Motor Carrier Library
 #include <ESP32Encoder.h>                                 // Motor encoder library to measure wheel speed
+#include "thrusters.h"                                    // Lab 8 fan thruster driver (this directory)
 
 /*---------------------------------------------------------------------------------------------*/
 // Globals:
@@ -120,6 +138,7 @@ uint32_t timeNext_testPoint; // time of next test point (ms)
 uint32_t interval_testPoint = 50; // time interval between test points (ms)
 
 float gyro_Z = 0.0;
+float rw_cmd_pwm = 0.0; // last RW output set from the menu (cmd 5) or cleared by cmd 0 (-1.0 to 1.0)
 float mag_X = 0.0;
 float mag_Y = 0.0;
 
@@ -136,6 +155,13 @@ void lab7_run_test_A();
 void lab7_run_test_B();
 float set_speed_test_B(uint32_t t0);
 void stream_RWspeed();
+void manual_set_thrusters();
+void lab8_thrust_sweep();
+void lab8_thruster_slew();
+void lab8_momentum_dump();
+void lab8_data_log();
+void lab8_heading_hold();
+void lab8_mag_heading_hold();
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // SETUP:
@@ -147,10 +173,24 @@ void setup() {
 
   Wire.begin(); // Initialize I2C communication
 
-  // Initialize built-in RGB LED (WS2812) and STAT LED
-  // #define RGB_BUILTIN  2
+  //----------------------------------------------
+  // Initialize Reaction Wheel (first, so the wheel is stopped even if a later step halts setup)
+  //----------------------------------------------
+  driver.enable(); // TB9051FTG Motor Driver
+  driver.setOutput(0);
+  enc.attachFullQuad(ENCODER_PIN_A, ENCODER_PIN_B); // Motor Encoder
+  enc.clearCount();
+  //----------------------------------------------
+
+  //----------------------------------------------
+  // Initialize Thrusters
+  //----------------------------------------------
+  thrusters_init();
+  //----------------------------------------------
+
+  // Initialize built-in RGB LED (WS2812). The STAT LED pin (GPIO13) drives the -Z fan, so it is
+  // set up by thrusters_init() above and must not be reset with pinMode() here.
   pinMode(RGB_BUILTIN, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
   neopixelWrite(RGB_BUILTIN, 255, 0, 0); // Default to red (R=255, G=0, B=0)
 
   //----------------------------------------------
@@ -202,15 +242,6 @@ void setup() {
   // Initialize Sun Sensor
   //----------------------------------------------
   analogReadResolution(12);
-
-  //----------------------------------------------
-  // Initialize Reaction Wheel
-  //----------------------------------------------
-  driver.enable(); // TB9051FTG Motor Driver
-  driver.setOutput(0);
-  enc.attachFullQuad(ENCODER_PIN_A, ENCODER_PIN_B); // Motor Encoder
-  enc.clearCount();
-  //----------------------------------------------
 
   Serial.println("[INFO] SETUP COMPLETE.");
   Xbee.println("[INFO] SETUP COMPLETE.SEND '1' FOR OPTIONS.");
@@ -301,7 +332,7 @@ int get_command_from_ground_station()
  * - 0: Stop reaction wheel motor
  * - 1: Print options menu
  * - 2: Get satellite RSSI
- * - 3: Toggle LED
+ * - 3: Disabled (GPIO13 status LED pin now drives the -Z fan)
  * - 4: Get battery telemetry (voltage, SOC, charge rate)
  * - 5: Manually set reaction wheel speed (throttle %)
  * - 6: Run Lab 6 - Attitude Determination test
@@ -325,34 +356,50 @@ void process_main_menu() {
   switch (received_int) {
     case 0:
       driver.setOutput(0);
-      Xbee.println("Motor Stopped.");
-      Serial.println("Motor Stopped.");
+      rw_cmd_pwm = 0.0;
+      thrusters_off();
+      Xbee.println("Motor and Thrusters Stopped.");
+      Serial.println("Motor and Thrusters Stopped.");
       break;
     
     case 1:
-      Xbee.print("0 - Stop reation wheel\n");
+      Xbee.print("0 - Stop reation wheel and thrusters\n");
       Xbee.print("1 - Print Options Menu\n");
       Xbee.print("2 - Get RSSI\n");
-      Xbee.print("3 - Toggle LED\n");
+      Xbee.print("3 - (disabled: LED pin used by -Z fan)\n");
       Xbee.print("4 - Get Battery State (V, SOC, dSOC/dt) \n");
       Xbee.print("5 - Set Motor Throttle Percent (-100...100)\n");
       Xbee.print("6 - Lab 6: Run Test\n");
       Xbee.print("7 - Lab 7: Run Test A\n");
       Xbee.print("8 - Lab 7: Run Test B\n");
       Xbee.print("9 - Stream RW speed\n");
+      Xbee.print("10 - Lab 8: Set Thrusters Percent (-100...100)\n");
+      Xbee.print("11 - Lab 8: Thrust Sweep (bench)\n");
+      Xbee.print("12 - Lab 8: Open-Loop Thruster Slew\n");
+      Xbee.print("13 - Lab 8: RW Momentum Dump\n");
+      Xbee.print("14 - Lab 8: Data Log with Fan Control\n");
+      Xbee.print("15 - Lab 8: Closed-Loop Heading Hold\n");
+      Xbee.print("16 - Lab 8: Closed-Loop Magnetic Heading Hold\n");
       Xbee.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Xbee.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       
-      Serial.print("0 - Stop reation wheel\n");
+      Serial.print("0 - Stop reation wheel and thrusters\n");
       Serial.print("1 - Print Options Menu\n");
       Serial.print("2 - Get RSSI\n");
-      Serial.print("3 - Toggle LED\n");
+      Serial.print("3 - (disabled: LED pin used by -Z fan)\n");
       Serial.print("4 - Get Battery State (V, SOC, dSOC/dt) \n");
       Serial.print("5 - Set Motor Throttle Percent (-100...100)\n");
       Serial.print("6 - Lab 6: Run Test\n");
       Serial.print("7 - Lab 7: Run Test A\n");
       Serial.print("8 - Lab 7: Run Test B\n");
       Serial.print("9 - Stream RW speed\n");
+      Serial.print("10 - Lab 8: Set Thrusters Percent (-100...100)\n");
+      Serial.print("11 - Lab 8: Thrust Sweep (bench)\n");
+      Serial.print("12 - Lab 8: Open-Loop Thruster Slew\n");
+      Serial.print("13 - Lab 8: RW Momentum Dump\n");
+      Serial.print("14 - Lab 8: Data Log with Fan Control\n");
+      Serial.print("15 - Lab 8: Closed-Loop Heading Hold\n");
+      Serial.print("16 - Lab 8: Closed-Loop Magnetic Heading Hold\n");
       Serial.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Serial.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       break;
@@ -362,10 +409,9 @@ void process_main_menu() {
       break;
 
     case 3:
-      digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-      Serial.print("LED is now ");
-      Serial.println(digitalRead(LED_BUILTIN) ? "LED ON" : "LED OFF");
-      Xbee.println(digitalRead(LED_BUILTIN) ? " LED ON" : " LED OFF");
+      // Lab 8: GPIO13 (LED_BUILTIN) now drives the -Z fan, so the LED toggle is disabled.
+      Serial.println("[CAUTION] Command 3 disabled: status LED pin (GPIO13) drives the -Z fan.");
+      Xbee.println("[CAUTION] Command 3 disabled: status LED pin (GPIO13) drives the -Z fan.");
       break;
 
     case 4:
@@ -390,6 +436,34 @@ void process_main_menu() {
 
     case 9:
       stream_RWspeed();
+      break;
+
+    case 10:
+      manual_set_thrusters();
+      break;
+
+    case 11:
+      lab8_thrust_sweep();
+      break;
+
+    case 12:
+      lab8_thruster_slew();
+      break;
+
+    case 13:
+      lab8_momentum_dump();
+      break;
+
+    case 14:
+      lab8_data_log();
+      break;
+
+    case 15:
+      lab8_heading_hold();
+      break;
+
+    case 16:
+      lab8_mag_heading_hold();
       break;
 
     case 98:
@@ -550,6 +624,7 @@ void manual_set_RW_speed(){
   delay(500);
 
   driver.setOutput(rw_speed);
+  rw_cmd_pwm = rw_speed;
 
   while(Serial.available()) Serial.read(); // clear serial buffer
   while(Xbee.available()) Xbee.read(); // clear Xbee buffer
@@ -1219,3 +1294,765 @@ void stream_RWspeed()
   }
 } //end stream_RWspeed()
 
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// LAB 8: THRUSTERS
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+static const char *LAB8_HEADER = "mcu time(ms),gyro_Z(deg/s),mag_X(uT),mag_Y(uT),w_RW_cmd(RPM),w_RW_meas(RPM),fan_plusZ_cmd(frac),fan_minusZ_cmd(frac),phase";
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8 Helpers:
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Sends a message to both USB Serial and XBee.
+ */
+static void lab8_println(const char *msg) {
+  Serial.println(msg);
+  Xbee.println(msg);
+}
+
+/**
+ * @brief Blocks until the user sends any key, then clears both input buffers.
+ */
+static void lab8_wait_for_key() {
+  while(!Serial.available() && !Xbee.available()){}
+  delay(100); // small delay to ensure serial buffer is fully received
+  while(Serial.available()) Serial.read();
+  while(Xbee.available()) Xbee.read();
+}
+
+/**
+ * @brief Prompts the user for an integer and waits for the reply.
+ *
+ * @param msg prompt text
+ * @return integer received (0 if the reply was not a number)
+ */
+static int lab8_prompt_int(const char *msg) {
+  lab8_println(msg);
+  while(!Serial.available() && !Xbee.available()){}
+  delay(100);
+  int value = get_command_from_ground_station();
+  while(Serial.available()) Serial.read();
+  while(Xbee.available()) Xbee.read();
+  return value;
+}
+
+/**
+ * @brief Returns true if the user sent 'X' or 'x' (abort). Other characters are ignored.
+ */
+static bool lab8_abort_requested() {
+  char c = 0;
+  if (Serial.available() > 0) c = Serial.read();
+  if (Xbee.available() > 0) c = Xbee.read();
+  return (c == 'X' || c == 'x');
+}
+
+/**
+ * @brief Creates a Lab 8 data file on SD and writes the header row.
+ *
+ * @param preamble file name prefix (max 12 characters)
+ * @return true if the file was created
+ */
+static bool lab8_open_file(const char *preamble) {
+  if (!sd_createDataFile(&dataFile, preamble)) {
+    lab8_println("[ERROR] Failed to create data file. Aborting test.");
+    return false;
+  }
+  dataFile.println(LAB8_HEADER);
+  dataFile.flush();
+  char file_name[40];
+  dataFile.getName(file_name, sizeof(file_name));
+  Xbee.print("[INFO] Data file created successfully: ");
+  Xbee.println(file_name);
+  Serial.print("[INFO] Data file created successfully: ");
+  Serial.println(file_name);
+  return true;
+}
+
+/**
+ * @brief Stops all actuators and closes the data file.
+ *
+ * @param msg message to send to the ground station
+ */
+static void lab8_end_test(const char *msg) {
+  thrusters_off();
+  driver.setOutput(0);
+  rw_cmd_pwm = 0.0;
+  dataFile.close();
+  lab8_println(msg);
+}
+
+/**
+ * @brief Reads the IMU into the gyro_Z, mag_X and mag_Y globals.
+ */
+static void lab8_read_imu() {
+  imu_sensor.getAGMT();
+  gyro_Z = imu_sensor.gyrZ();
+  mag_X = imu_sensor.magX();
+  mag_Y = imu_sensor.magY();
+}
+
+/**
+ * @brief Measures reaction wheel speed from the encoder since the last call.
+ *
+ * @return wheel speed (RPM, gearbox output shaft)
+ */
+static float lab8_measure_RW_rpm() {
+  static int64_t lastCount = 0;
+  static uint32_t timeLastEncMeas = 0;
+  uint32_t timeNow = millis();
+  int64_t c = enc.getCount();
+  float dt_s = (timeNow - timeLastEncMeas) / 1000.0f;
+  float rpm = 0.0;
+  if (dt_s > 0) {
+    float rev = (float)(c - lastCount) / ((float)CPR * 10.0);
+    rpm = (rev / dt_s) * 60.0f;
+  }
+  lastCount = c;
+  timeLastEncMeas = timeNow;
+  return rpm;
+}
+
+/**
+ * @brief Reads sensors and writes one row to the data file and USB Serial.
+ *
+ * @param time test time (ms since test start)
+ * @param rw_pwm commanded reaction wheel output (-1.0 to 1.0)
+ * @param phase test phase number (meaning depends on the test)
+ */
+static void lab8_log_row(uint32_t time, float rw_pwm, int phase) {
+  lab8_read_imu();
+  float w_RW_cmd = -rw_pwm * 1000.0 * MOTOR_VOLTAGE / 12.0; // same scaling as Lab 7
+  float w_RW_meas = lab8_measure_RW_rpm();
+
+  char row[160];
+  snprintf(row, sizeof(row), "%lu,%.3f,%.3f,%.3f,%.1f,%.1f,%.3f,%.3f,%d",
+           (unsigned long)time, gyro_Z, mag_X, mag_Y, w_RW_cmd, w_RW_meas,
+           thrusters_get_plusZ(), thrusters_get_minusZ(), phase);
+  dataFile.println(row);
+  dataFile.flush();
+  Serial.println(row);
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Manually Set Thrusters
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Prompts for a thruster command and applies it until changed or stopped (cmd 0).
+ *
+ * Positive percent runs the +Z fan, negative runs the -Z fan. Use this with cmd 9 or a
+ * gyro stream to check that each fan turns KestrelSAT the expected way.
+ */
+void manual_set_thrusters() {
+  int pct = lab8_prompt_int("Enter Thruster Percent (-100 to 100, + = +Z fan, - = -Z fan):");
+  pct = constrain(pct, -100, 100);
+  thrusters_set(pct / 100.0);
+  Serial.print("[INFO] Thrusters set to (%): ");
+  Serial.println(pct);
+  Xbee.print("[INFO] Thrusters set to (%): ");
+  Xbee.println(pct);
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Thrust Sweep
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Bench test that steps each fan through 25/50/75/100% duty to measure thrust vs. command.
+ *
+ * Mount one fan at a time on a scale (or the thruster module on a pendulum) and record the
+ * reading for each step. Each step is held 5 s with 3 s off between steps; the +Z fan runs
+ * first, then the -Z fan. Phase column = step number (0 = off).
+ */
+void lab8_thrust_sweep() {
+  const float steps[] = {0.25, 0.50, 0.75, 1.00};
+  const int n_steps = sizeof(steps) / sizeof(steps[0]);
+  const uint32_t STEP_ON_MS = 5000;
+  const uint32_t STEP_OFF_MS = 3000;
+  const uint32_t STEP_MS = STEP_ON_MS + STEP_OFF_MS;
+  const uint32_t TEST_MS = 2 * n_steps * STEP_MS;
+
+  if (!lab8_open_file("Lab8_sweep")) return;
+  lab8_println("[INFO] Ready to start thrust sweep, send any key to begin (send 'X' to abort)...");
+  lab8_wait_for_key();
+
+  neopixelWrite(RGB_BUILTIN, 255, 255, 0); // Set to yellow (R=255, G=255, B=0)
+  uint32_t t0 = millis();
+  timeNext_testPoint = t0;
+  int last_step = -1;
+  while (true) {
+    if (lab8_abort_requested()) {
+      lab8_end_test("[CAUTION] Test Canceled Early. File closed.");
+      return;
+    }
+
+    uint32_t t = millis() - t0;
+    if (t >= TEST_MS) {
+      lab8_end_test("[INFO] Thrust Sweep Complete. File closed.");
+      return;
+    }
+
+    // Set fan duty for the current step:
+    int step = t / STEP_MS;                     // 0..(2*n_steps - 1)
+    bool on = (t % STEP_MS) < STEP_ON_MS;
+    float duty = on ? steps[step % n_steps] : 0.0;
+    if (step < n_steps) {
+      thrusters_set_each(duty, 0.0);
+    } else {
+      thrusters_set_each(0.0, duty);
+    }
+    int phase = on ? step + 1 : 0;
+    if (on && step != last_step) {
+      last_step = step;
+      char msg[64];
+      snprintf(msg, sizeof(msg), "[INFO] %s fan at %d%%", step < n_steps ? "+Z" : "-Z", (int)(duty * 100));
+      lab8_println(msg);
+    }
+
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+      lab8_log_row(t, 0.0, phase);
+    }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Open-Loop Thruster Slew
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Open-loop rest-to-rest slew using the thrusters only (KestrelSAT hung by a string).
+ *
+ * Profile (phase column):
+ *  - 1: 0-2 s idle (KestrelSAT should be released and still)
+ *  - 2: +Z fan at 100% for the burn time
+ *  - 3: -Z fan at 100% for the same burn time to stop the rotation
+ *  - 4: coast with thrusters off for 10 s
+ *
+ * With equal fans, the slew angle grows with the square of the burn time. Use the Simulink
+ * model or thrust sweep data to choose the burn time for a 180 deg slew.
+ */
+void lab8_thruster_slew() {
+  int burn_s = lab8_prompt_int("Enter burn time per direction in seconds (1 to 60):");
+  burn_s = constrain(burn_s, 1, 60);
+  const uint32_t IDLE_MS = 2000;
+  const uint32_t BURN_MS = (uint32_t)burn_s * 1000;
+  const uint32_t COAST_MS = 10000;
+
+  if (!lab8_open_file("Lab8_slew")) return;
+  lab8_println("[INFO] Hang and steady KestrelSAT, then send any key to begin (send 'X' to abort)...");
+  lab8_wait_for_key();
+
+  neopixelWrite(RGB_BUILTIN, 255, 255, 255); // Set to white (R=255, G=255, B=255)
+  uint32_t t0 = millis();
+  timeNext_testPoint = t0;
+  while (true) {
+    if (lab8_abort_requested()) {
+      lab8_end_test("[CAUTION] Test Canceled Early. File closed.");
+      return;
+    }
+
+    uint32_t t = millis() - t0;
+    int phase;
+    if (t < IDLE_MS) {
+      phase = 1;
+      thrusters_off();
+    } else if (t < IDLE_MS + BURN_MS) {
+      phase = 2;
+      thrusters_set(1.0);
+    } else if (t < IDLE_MS + 2 * BURN_MS) {
+      phase = 3;
+      thrusters_set(-1.0);
+    } else if (t < IDLE_MS + 2 * BURN_MS + COAST_MS) {
+      phase = 4;
+      thrusters_off();
+    } else {
+      lab8_end_test("[INFO] Thruster Slew Complete. File closed.");
+      return;
+    }
+
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+      lab8_log_row(t, 0.0, phase);
+    }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Reaction Wheel Momentum Dump
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Spins the RW to full speed, then slows it to zero while the thrusters hold the body still.
+ *
+ * Profile (phase column):
+ *  - 1: 0-10 s hold KestrelSAT by hand while the RW spins up to 100% (LED white)
+ *  - 2: 10-13 s release KestrelSAT when the LED turns blue; RW holds full speed
+ *  - 3: RW command ramps from 100% to 0 over the ramp time; thrusters damp body rate
+ *  - 4: 15 s more of rate damping with the RW off
+ *
+ * Slowing the wheel moves its momentum into the body. The thrusters fire against the measured
+ * body rate (gyro Z) to remove that momentum: full thrust at DUMP_FULL_RATE_DPS, nothing inside
+ * DUMP_DEADBAND_DPS. This needs the +Z fan to really turn KestrelSAT +Z (check with cmd 10 first).
+ */
+void lab8_momentum_dump() {
+  const float DUMP_DEADBAND_DPS = 2.0;
+  const float DUMP_FULL_RATE_DPS = 20.0;
+  int ramp_s = lab8_prompt_int("Enter RW ramp-down time in seconds (5 to 900):");
+  ramp_s = constrain(ramp_s, 5, 900);
+  const uint32_t SPINUP_MS = 10000;
+  const uint32_t RELEASE_MS = 3000;
+  const uint32_t RAMP_MS = (uint32_t)ramp_s * 1000;
+  const uint32_t DAMP_MS = 15000;
+  const uint32_t RAMP_START = SPINUP_MS + RELEASE_MS;
+
+  if (!lab8_open_file("Lab8_dump")) return;
+  lab8_println("[INFO] Hold KestrelSAT still, then send any key to begin. Release when LED turns BLUE (send 'X' to abort)...");
+  lab8_wait_for_key();
+
+  neopixelWrite(RGB_BUILTIN, 255, 255, 255); // Set to white (R=255, G=255, B=255)
+  uint32_t t0 = millis();
+  timeNext_testPoint = t0;
+  bool released = false;
+  while (true) {
+    if (lab8_abort_requested()) {
+      lab8_end_test("[CAUTION] Test Canceled Early. File closed.");
+      return;
+    }
+
+    uint32_t t = millis() - t0;
+    int phase;
+    float rw_pwm;
+    if (t < SPINUP_MS) {
+      phase = 1;
+      rw_pwm = 1.0;
+    } else if (t < RAMP_START) {
+      phase = 2;
+      rw_pwm = 1.0;
+      if (!released) {
+        released = true;
+        neopixelWrite(RGB_BUILTIN, 0, 0, 255); // Set to blue (R=0, G=0, B=255): release KestrelSAT
+        lab8_println("[INFO] Release KestrelSAT now.");
+      }
+    } else if (t < RAMP_START + RAMP_MS) {
+      phase = 3;
+      rw_pwm = 1.0 - (float)(t - RAMP_START) / RAMP_MS;
+    } else if (t < RAMP_START + RAMP_MS + DAMP_MS) {
+      phase = 4;
+      rw_pwm = 0.0;
+    } else {
+      lab8_end_test("[INFO] Momentum Dump Complete. File closed.");
+      return;
+    }
+    driver.setOutput(rw_pwm);
+
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+
+      // Rate damping with thrusters (phases 3 and 4 only), using the latest gyro reading:
+      if (phase >= 3) {
+        float rate = gyro_Z;
+        float cmd = 0.0;
+        if (fabs(rate) > DUMP_DEADBAND_DPS) {
+          cmd = constrain(-rate / DUMP_FULL_RATE_DPS, -1.0f, 1.0f);
+        }
+        thrusters_set(cmd);
+      }
+
+      lab8_log_row(t, rw_pwm, phase);
+    }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Data Log with Manual Fan Control
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Logs time, gyro Z, both fan states and RW speed to a CSV on SD until the user ends the test.
+ *
+ * While logging, single keys sent over USB or XBee control the fans:
+ *  - '1': toggle the +Z fan (full on / off)
+ *  - '2': toggle the -Z fan (full on / off)
+ *  - '0': turn both fans off
+ *  - 'X' or 'x': turn both fans off, close the file and end the test
+ *
+ * Each row is also streamed to USB (every row) and XBee (every 4th row) so the data can be watched live. The CSV opens
+ * directly in Excel. Columns: time (s), gyro Z (deg/s), mag X and Y (uT), +Z fan state (1 = on), -Z fan state,
+ * RW commanded speed (RPM, set with cmd 5 before the test; same scaling as Lab 7) and RW measured
+ * speed (RPM, from the encoder). The RW is not changed by this test.
+ */
+void lab8_data_log() {
+  if (!sd_createDataFile(&dataFile, "Lab8_log")) {
+    lab8_println("[ERROR] Failed to create data file. Aborting test.");
+    return;
+  }
+  dataFile.println("time(s),gyro_Z(deg/s),mag_X(uT),mag_Y(uT),fan_plusZ_on,fan_minusZ_on,w_RW_cmd(RPM),w_RW_meas(RPM)");
+  dataFile.flush();
+  char file_name[40];
+  dataFile.getName(file_name, sizeof(file_name));
+  Xbee.print("[INFO] Data file created successfully: ");
+  Xbee.println(file_name);
+  Serial.print("[INFO] Data file created successfully: ");
+  Serial.println(file_name);
+
+  lab8_println("[INFO] Send any key to start logging. During the test: '1' = toggle +Z fan, '2' = toggle -Z fan, '0' = fans off, 'X' = end test.");
+  lab8_wait_for_key();
+  lab8_println("[INFO] Logging started.");
+
+  neopixelWrite(RGB_BUILTIN, 128, 0, 255); // Set to violet (R=128, G=0, B=255)
+  bool plusZ_on = false;
+  bool minusZ_on = false;
+  thrusters_off();
+  uint32_t t0 = millis();
+  timeNext_testPoint = t0;
+  while (true) {
+    // Check for key commands from USB or XBee:
+    int c = -1;
+    if (Serial.available() > 0) c = Serial.read();
+    else if (Xbee.available() > 0) c = Xbee.read();
+    switch (c) {
+      case '1':
+        plusZ_on = !plusZ_on;
+        lab8_println(plusZ_on ? "[INFO] +Z fan ON" : "[INFO] +Z fan OFF");
+        break;
+      case '2':
+        minusZ_on = !minusZ_on;
+        lab8_println(minusZ_on ? "[INFO] -Z fan ON" : "[INFO] -Z fan OFF");
+        break;
+      case '0':
+        plusZ_on = false;
+        minusZ_on = false;
+        lab8_println("[INFO] Both fans OFF");
+        break;
+      case 'X':
+      case 'x':
+        thrusters_off();
+        dataFile.close();
+        neopixelWrite(RGB_BUILTIN, 0, 255, 0); // Set to green (R=0, G=255, B=0)
+        lab8_println("[INFO] Data Log Complete. File closed.");
+        return;
+      default:
+        break; // ignore newlines and other characters
+    }
+    thrusters_set_each(plusZ_on ? 1.0 : 0.0, minusZ_on ? 1.0 : 0.0);
+
+    // Record test point:
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+      lab8_read_imu();
+      float time_s = (millis() - t0) / 1000.0f;
+      float w_RW_cmd = -rw_cmd_pwm * 1000.0 * MOTOR_VOLTAGE / 12.0; // same scaling as Lab 7
+      float w_RW_meas = lab8_measure_RW_rpm();
+
+      char row[128];
+      snprintf(row, sizeof(row), "%.3f,%.3f,%.2f,%.2f,%d,%d,%.1f,%.1f", time_s, gyro_Z, mag_X, mag_Y,
+               plusZ_on ? 1 : 0, minusZ_on ? 1 : 0, w_RW_cmd, w_RW_meas);
+      dataFile.println(row);
+      dataFile.flush();
+      Serial.println(row);
+      // XBee at 9600 baud cannot keep up with every row, so only every 4th row (5 Hz) is sent over the radio.
+      // The SD file and USB stream still get every row.
+      static uint32_t xbee_row_count = 0;
+      if (xbee_row_count++ % 4 == 0) Xbee.println(row);
+    }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Closed-Loop Heading Hold
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Wraps an angle to the range -180 to +180 deg.
+ */
+static float lab8_wrap180(float deg) {
+  while (deg > 180.0f) deg -= 360.0f;
+  while (deg < -180.0f) deg += 360.0f;
+  return deg;
+}
+
+/**
+ * @brief Bang-bang thruster decision on the predicted stopping error (shared by cmds 15 and 16).
+ *
+ * @param error     heading error target - heading (deg), in the gyro_Z sign convention
+ * @param rate      body rate gyro_Z - bias (deg/s)
+ * @param fan_state previous fan state (+1 = +Z fan, -1 = -Z fan, 0 = off)
+ * @param u_out     returns the predicted stopping error u (deg)
+ * @return new fan state
+ */
+static int lab8_hold_fan_state(float error, float rate, int fan_state, float *u_out) {
+  float u = error - rate * fabs(rate) / (2.0f * HOLD_ALPHA_DPS2) - rate * HOLD_FAN_LAG_S;
+  if (u > HOLD_DEADBAND_ON_DEG) {
+    fan_state = 1;
+  } else if (u < -HOLD_DEADBAND_ON_DEG) {
+    fan_state = -1;
+  } else if (fabs(u) < HOLD_DEADBAND_OFF_DEG) {
+    fan_state = 0;
+  }
+  *u_out = u;
+  return fan_state;
+}
+
+/**
+ * @brief Holds KestrelSAT at its starting heading using the thrusters and integrated gyro heading.
+ *
+ * Steps:
+ *  1. Hold KestrelSAT still for HOLD_BIAS_CAL_MS while the gyro bias is averaged (LED white).
+ *  2. The current heading becomes the target (0 deg). LED turns azure and the loop starts.
+ *  3. Every loop: heading += (gyro_Z - bias) * dt. The controller predicts the stopping error
+ *       u = error - rate*|rate| / (2*HOLD_ALPHA_DPS2) - rate*HOLD_FAN_LAG_S
+ *     and fires the +Z fan if u > HOLD_DEADBAND_ON_DEG, the -Z fan if u < -HOLD_DEADBAND_ON_DEG,
+ *     and turns the fan off once |u| < HOLD_DEADBAND_OFF_DEG (hysteresis stops chatter).
+ *
+ * Keys during the test: 'Z' re-zeros the target to the current heading, 'X' ends the test.
+ * Assumes the +Z fan makes gyro_Z positive (check with cmd 14: press '1', gyro_Z should go up).
+ * Logs to SD every 50 ms: time, gyro Z, heading, error, prediction u, mag X/Y, fan states.
+ */
+void lab8_heading_hold() {
+  if (!sd_createDataFile(&dataFile, "Lab8_hold")) {
+    lab8_println("[ERROR] Failed to create data file. Aborting test.");
+    return;
+  }
+  dataFile.println("time(s),gyro_Z(deg/s),heading(deg),error(deg),u_pred(deg),mag_X(uT),mag_Y(uT),fan_plusZ_on,fan_minusZ_on");
+  dataFile.flush();
+  char file_name[40];
+  dataFile.getName(file_name, sizeof(file_name));
+  Xbee.print("[INFO] Data file created successfully: ");
+  Xbee.println(file_name);
+  Serial.print("[INFO] Data file created successfully: ");
+  Serial.println(file_name);
+
+  lab8_println("[INFO] Hold KestrelSAT still and send any key to measure gyro bias. During the test: 'Z' = re-zero target, 'X' = end.");
+  lab8_wait_for_key();
+  thrusters_off();
+
+  // 1. Gyro bias calibration:
+  neopixelWrite(RGB_BUILTIN, 255, 255, 255); // Set to white (R=255, G=255, B=255)
+  float bias_sum = 0.0;
+  uint32_t n_bias = 0;
+  uint32_t t_cal = millis();
+  while (millis() - t_cal < HOLD_BIAS_CAL_MS) {
+    lab8_read_imu();
+    bias_sum += gyro_Z;
+    n_bias++;
+    delay(5);
+  }
+  float bias = (n_bias > 0) ? bias_sum / n_bias : 0.0;
+  char msg[96];
+  snprintf(msg, sizeof(msg), "[INFO] Gyro bias = %.3f deg/s. Holding heading now; release KestrelSAT.", bias);
+  lab8_println(msg);
+
+  // 2. Hold loop:
+  neopixelWrite(RGB_BUILTIN, 0, 128, 255); // Set to azure (R=0, G=128, B=255)
+  float heading = 0.0;   // integrated heading relative to start (deg, unwrapped)
+  float target = 0.0;    // target heading (deg)
+  int fan_state = 0;     // +1 = +Z fan on, -1 = -Z fan on, 0 = off
+  uint32_t t0 = millis();
+  uint32_t t_prev_us = micros();
+  timeNext_testPoint = t0;
+  uint32_t xbee_row_count = 0;
+  while (true) {
+    // Key commands:
+    int c = -1;
+    if (Serial.available() > 0) c = Serial.read();
+    else if (Xbee.available() > 0) c = Xbee.read();
+    if (c == 'X' || c == 'x') {
+      thrusters_off();
+      dataFile.close();
+      neopixelWrite(RGB_BUILTIN, 0, 255, 0); // Set to green (R=0, G=255, B=0)
+      lab8_println("[INFO] Heading Hold Complete. File closed.");
+      return;
+    }
+    if (c == 'Z' || c == 'z') {
+      target = heading;
+      lab8_println("[INFO] Target re-zeroed to current heading.");
+    }
+
+    // Integrate gyro heading:
+    lab8_read_imu();
+    uint32_t t_now_us = micros();
+    float dt = (t_now_us - t_prev_us) / 1.0e6f;
+    t_prev_us = t_now_us;
+    float rate = gyro_Z - bias;
+    heading += rate * dt;
+
+    // Bang-bang control on predicted stopping error:
+    float error = lab8_wrap180(target - heading);
+    float u;
+    fan_state = lab8_hold_fan_state(error, rate, fan_state, &u);
+    thrusters_set((float)fan_state);
+
+    // Record test point:
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+      float time_s = (millis() - t0) / 1000.0f;
+      char row[128];
+      snprintf(row, sizeof(row), "%.3f,%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d", time_s, rate, heading, error, u,
+               mag_X, mag_Y, fan_state > 0 ? 1 : 0, fan_state < 0 ? 1 : 0);
+      dataFile.println(row);
+      dataFile.flush();
+      Serial.println(row);
+      if (xbee_row_count++ % 4 == 0) Xbee.println(row); // XBee gets every 4th row (5 Hz)
+    }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Closed-Loop Magnetic Heading Hold
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Magnetic heading (deg, 0-360) from mag X/Y with hard-iron offsets removed.
+ *
+ * Same formula as the team's MATLAB: atan2d(magX - offX, magY - offY), wrapped to 0-360.
+ */
+static float lab8_mag_heading(float mx, float my, float off_x, float off_y) {
+  float h = atan2f(mx - off_x, my - off_y) * (180.0f / (float)M_PI);
+  if (h < 0.0f) h += 360.0f;
+  return h;
+}
+
+/**
+ * @brief Holds KestrelSAT at its starting magnetic heading using the thrusters.
+ *
+ * Same controller as cmd 15, but the heading comes from the magnetometer instead of the integrated gyro,
+ * so it does not drift. The gyro is still used for the rate (braking) term because it is far less noisy.
+ *
+ * Steps:
+ *  1. Optional magnetometer calibration: send 'C', turn KestrelSAT slowly through at least one full
+ *     turn, then send any key. Offsets = (max + min) / 2 of mag X and Y. Any other key uses
+ *     MAG_OFFSET_X_UT / MAG_OFFSET_Y_UT from definitions.h. The offsets are printed so they can be saved there.
+ *  2. Hold KestrelSAT still for HOLD_BIAS_CAL_MS (LED white): gyro bias and mag X/Y are averaged,
+ *     and the averaged magnetic heading becomes the target.
+ *  3. Hold loop (LED rose): mag X/Y are low-pass filtered (time constant MAG_FILTER_TAU_S), the heading is
+ *     computed, error = wrap180(target - heading) is converted to the gyro sign with MAG_HEADING_SIGN,
+ *     and the cmd 15 bang-bang controller picks the fan.
+ *
+ * Keys during the test: 'Z' re-zeros the target to the current magnetic heading, 'X' ends the test.
+ * If KestrelSAT turns away from the target instead of back to it, flip MAG_HEADING_SIGN in definitions.h.
+ * Logs to SD every 50 ms: time, gyro Z, mag heading, target, error, prediction u, mag X/Y, fan states.
+ */
+void lab8_mag_heading_hold() {
+  if (!sd_createDataFile(&dataFile, "Lab8_maghold")) {
+    lab8_println("[ERROR] Failed to create data file. Aborting test.");
+    return;
+  }
+  dataFile.println("time(s),gyro_Z(deg/s),mag_heading(deg),target(deg),error(deg),u_pred(deg),mag_X(uT),mag_Y(uT),fan_plusZ_on,fan_minusZ_on");
+  dataFile.flush();
+  char file_name[40];
+  dataFile.getName(file_name, sizeof(file_name));
+  Xbee.print("[INFO] Data file created successfully: ");
+  Xbee.println(file_name);
+  Serial.print("[INFO] Data file created successfully: ");
+  Serial.println(file_name);
+  thrusters_off();
+
+  // 1. Optional magnetometer calibration spin:
+  float off_x = MAG_OFFSET_X_UT;
+  float off_y = MAG_OFFSET_Y_UT;
+  lab8_println("[INFO] Send 'C' to calibrate the magnetometer, or any other key to use the saved offsets.");
+  while (!Serial.available() && !Xbee.available()) {}
+  int c = Serial.available() ? Serial.read() : Xbee.read();
+  delay(100);
+  while (Serial.available()) Serial.read();
+  while (Xbee.available()) Xbee.read();
+  char msg[128];
+  if (c == 'C' || c == 'c') {
+    lab8_println("[INFO] Turn KestrelSAT slowly through at least one full turn, then send any key.");
+    neopixelWrite(RGB_BUILTIN, 255, 255, 0); // Set to yellow (R=255, G=255, B=0) while calibrating
+    lab8_read_imu();
+    float x_min = mag_X, x_max = mag_X, y_min = mag_Y, y_max = mag_Y;
+    while (!Serial.available() && !Xbee.available()) {
+      lab8_read_imu();
+      x_min = fminf(x_min, mag_X); x_max = fmaxf(x_max, mag_X);
+      y_min = fminf(y_min, mag_Y); y_max = fmaxf(y_max, mag_Y);
+      delay(10);
+    }
+    delay(100);
+    while (Serial.available()) Serial.read();
+    while (Xbee.available()) Xbee.read();
+    off_x = 0.5f * (x_max + x_min);
+    off_y = 0.5f * (y_max + y_min);
+    snprintf(msg, sizeof(msg), "[INFO] Mag offsets: X = %.2f uT, Y = %.2f uT (save in definitions.h as MAG_OFFSET_X_UT/Y_UT).", off_x, off_y);
+    lab8_println(msg);
+  } else {
+    snprintf(msg, sizeof(msg), "[INFO] Using saved mag offsets: X = %.2f uT, Y = %.2f uT.", off_x, off_y);
+    lab8_println(msg);
+  }
+
+  lab8_println("[INFO] Point KestrelSAT at the heading to hold, hold it still and send any key. During the test: 'Z' = re-zero target, 'X' = end.");
+  lab8_wait_for_key();
+
+  // 2. Gyro bias and starting heading:
+  neopixelWrite(RGB_BUILTIN, 255, 255, 255); // Set to white (R=255, G=255, B=255)
+  float bias_sum = 0.0, mx_sum = 0.0, my_sum = 0.0;
+  uint32_t n_cal = 0;
+  uint32_t t_cal = millis();
+  while (millis() - t_cal < HOLD_BIAS_CAL_MS) {
+    lab8_read_imu();
+    bias_sum += gyro_Z;
+    mx_sum += mag_X;
+    my_sum += mag_Y;
+    n_cal++;
+    delay(5);
+  }
+  float bias = (n_cal > 0) ? bias_sum / n_cal : 0.0;
+  float mx_f = (n_cal > 0) ? mx_sum / n_cal : mag_X; // filtered mag X/Y, start at the averages
+  float my_f = (n_cal > 0) ? my_sum / n_cal : mag_Y;
+  float heading = lab8_mag_heading(mx_f, my_f, off_x, off_y);
+  float target = heading;
+  snprintf(msg, sizeof(msg), "[INFO] Gyro bias = %.3f deg/s, target heading = %.1f deg. Holding now; release KestrelSAT.", bias, target);
+  lab8_println(msg);
+
+  // 3. Hold loop:
+  neopixelWrite(RGB_BUILTIN, 255, 0, 128); // Set to rose (R=255, G=0, B=128)
+  int fan_state = 0;     // +1 = +Z fan on, -1 = -Z fan on, 0 = off
+  uint32_t t0 = millis();
+  uint32_t t_prev_us = micros();
+  timeNext_testPoint = t0;
+  uint32_t xbee_row_count = 0;
+  while (true) {
+    // Key commands:
+    c = -1;
+    if (Serial.available() > 0) c = Serial.read();
+    else if (Xbee.available() > 0) c = Xbee.read();
+    if (c == 'X' || c == 'x') {
+      thrusters_off();
+      dataFile.close();
+      neopixelWrite(RGB_BUILTIN, 0, 255, 0); // Set to green (R=0, G=255, B=0)
+      lab8_println("[INFO] Magnetic Heading Hold Complete. File closed.");
+      return;
+    }
+    if (c == 'Z' || c == 'z') {
+      target = heading;
+      lab8_println("[INFO] Target re-zeroed to current magnetic heading.");
+    }
+
+    // Filtered magnetic heading:
+    lab8_read_imu();
+    uint32_t t_now_us = micros();
+    float dt = (t_now_us - t_prev_us) / 1.0e6f;
+    t_prev_us = t_now_us;
+    float a = dt / (MAG_FILTER_TAU_S + dt);
+    mx_f += a * (mag_X - mx_f);
+    my_f += a * (mag_Y - my_f);
+    heading = lab8_mag_heading(mx_f, my_f, off_x, off_y);
+    float rate = gyro_Z - bias;
+
+    // Bang-bang control, with the magnetic error converted to the gyro_Z sign:
+    float error = lab8_wrap180(target - heading);
+    float u;
+    fan_state = lab8_hold_fan_state(MAG_HEADING_SIGN * error, rate, fan_state, &u);
+    thrusters_set((float)fan_state);
+
+    // Record test point:
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+      float time_s = (millis() - t0) / 1000.0f;
+      char row[144];
+      snprintf(row, sizeof(row), "%.3f,%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d", time_s, rate, heading, target, error, u,
+               mag_X, mag_Y, fan_state > 0 ? 1 : 0, fan_state < 0 ? 1 : 0);
+      dataFile.println(row);
+      dataFile.flush();
+      Serial.println(row);
+      if (xbee_row_count++ % 4 == 0) Xbee.println(row); // XBee gets every 4th row (5 Hz)
+    }
+  }
+}
