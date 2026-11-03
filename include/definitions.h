@@ -47,3 +47,5 @@
 #define MAG_OFFSET_Y_UT         0.0    // hard-iron offset of mag Y (uT)
 #define MAG_FILTER_TAU_S        0.2    // low-pass time constant on mag X/Y (s); larger = smoother but more lag
 #define MAG_HEADING_SIGN        -1.0   // +1 if mag heading increases when gyro_Z is positive, -1 if it decreases (team MATLAB shows -1)
+#define MAG_HOLD_BAND_DEG       5.0    // fans stay off while the predicted stop is within +/- this of the target (deg)
+#define MAG_HOLD_CENTER_DEG     0.5    // once outside the band, push until the predicted stop is within this of the target (deg)

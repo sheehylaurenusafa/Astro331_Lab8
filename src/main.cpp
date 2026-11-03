@@ -1775,16 +1775,18 @@ static float lab8_wrap180(float deg) {
  * @param error     heading error target - heading (deg), in the gyro_Z sign convention
  * @param rate      body rate gyro_Z - bias (deg/s)
  * @param fan_state previous fan state (+1 = +Z fan, -1 = -Z fan, 0 = off)
+ * @param on_deg    fire a fan when |u| exceeds this (deg)
+ * @param off_deg   turn the fan off once |u| falls below this (deg)
  * @param u_out     returns the predicted stopping error u (deg)
  * @return new fan state
  */
-static int lab8_hold_fan_state(float error, float rate, int fan_state, float *u_out) {
+static int lab8_hold_fan_state(float error, float rate, int fan_state, float on_deg, float off_deg, float *u_out) {
   float u = error - rate * fabs(rate) / (2.0f * HOLD_ALPHA_DPS2) - rate * HOLD_FAN_LAG_S;
-  if (u > HOLD_DEADBAND_ON_DEG) {
+  if (u > on_deg) {
     fan_state = 1;
-  } else if (u < -HOLD_DEADBAND_ON_DEG) {
+  } else if (u < -on_deg) {
     fan_state = -1;
-  } else if (fabs(u) < HOLD_DEADBAND_OFF_DEG) {
+  } else if (fabs(u) < off_deg) {
     fan_state = 0;
   }
   *u_out = u;
@@ -1877,7 +1879,7 @@ void lab8_heading_hold() {
     // Bang-bang control on predicted stopping error:
     float error = lab8_wrap180(target - heading);
     float u;
-    fan_state = lab8_hold_fan_state(error, rate, fan_state, &u);
+    fan_state = lab8_hold_fan_state(error, rate, fan_state, HOLD_DEADBAND_ON_DEG, HOLD_DEADBAND_OFF_DEG, &u);
     thrusters_set((float)fan_state);
 
     // Record test point:
@@ -1923,7 +1925,9 @@ static float lab8_mag_heading(float mx, float my, float off_x, float off_y) {
  *     and the averaged magnetic heading becomes the target.
  *  3. Hold loop (LED rose): mag X/Y are low-pass filtered (time constant MAG_FILTER_TAU_S), the heading is
  *     computed, error = wrap180(target - heading) is converted to the gyro sign with MAG_HEADING_SIGN,
- *     and the cmd 15 bang-bang controller picks the fan.
+ *     and the cmd 15 bang-bang controller picks the fan. The fans stay off while the predicted stop is
+ *     within +/-MAG_HOLD_BAND_DEG (5 deg) of the target; once it is outside, a fan pushes KestrelSAT
+ *     back until the predicted stop is within MAG_HOLD_CENTER_DEG of the target (back to center).
  *
  * Keys during the test: 'Z' re-zeros the target to the current magnetic heading, 'X' ends the test.
  * If KestrelSAT turns away from the target instead of back to it, flip MAG_HEADING_SIGN in definitions.h.
@@ -2039,7 +2043,7 @@ void lab8_mag_heading_hold() {
     // Bang-bang control, with the magnetic error converted to the gyro_Z sign:
     float error = lab8_wrap180(target - heading);
     float u;
-    fan_state = lab8_hold_fan_state(MAG_HEADING_SIGN * error, rate, fan_state, &u);
+    fan_state = lab8_hold_fan_state(MAG_HEADING_SIGN * error, rate, fan_state, MAG_HOLD_BAND_DEG, MAG_HOLD_CENTER_DEG, &u);
     thrusters_set((float)fan_state);
 
     // Record test point:
