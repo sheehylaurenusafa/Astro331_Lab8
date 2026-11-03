@@ -44,8 +44,8 @@
 #define HOLD_MIN_OFF_MS         500    // after a fan turns off, neither fan fires for this long (ms); lets it spin down
 
 // Magnetic heading hold (cmd 16): same controller as cmd 15, heading from the magnetometer.
-#define MAG_OFFSET_X_UT         0.0    // hard-iron offset of mag X (uT); cmd 16 'C' calibration prints this, or use (max+min)/2 from a full-turn log
-#define MAG_OFFSET_Y_UT         0.0    // hard-iron offset of mag Y (uT)
+#define MAG_OFFSET_X_UT         -50.52 // hard-iron offset of mag X (uT); avg of 2026-11-03 cmd 16 calibrations (-50.55, -50.47); recalibrate with cmd 16 C
+#define MAG_OFFSET_Y_UT         -27.41 // hard-iron offset of mag Y (uT); avg of -27.52 and -27.30 (a third run gave -42.45, treated as an incomplete turn)
 #define MAG_FILTER_TAU_S        0.2    // low-pass time constant on mag X/Y (s); larger = smoother but more lag
 #define MAG_HEADING_SIGN        -1.0   // +1 if mag heading increases when gyro_Z is positive, -1 if it decreases (team MATLAB shows -1)
 #define MAG_HOLD_BAND_DEG       5.0    // fans stay off while the predicted stop is within +/- this of the target (deg)
