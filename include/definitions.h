@@ -58,6 +58,22 @@
 #define CLDUMP_DECEL_OK_RPMS    2.0    // full-speed spin-down while the measured wheel slows less than this (RPM/s)
 #define CLDUMP_DECEL_LIMIT_RPMS 5.0    // spin-down pauses when the measured wheel slows this fast (RPM/s); 2026-11-03 dump log: fans kept up at ~5-7 RPM/s
 
+// Wheel-held momentum dump (cmd 18): the RW holds the magnetic heading while one thruster drains it.
+// Measured RW speed vs PWM command, from the 2026-11-03 Lab8_cldump_data002 log (0.1 -> ~270 RPM held;
+// speed collapses below ~1.2%). The 100% point is the Lab 7 spec (410 RPM). Update from new logs.
+#define RW_TABLE_N              7
+static const float RW_TABLE_PWM[RW_TABLE_N] = {0.0,  0.0105, 0.0124, 0.0216, 0.038, 0.10,  1.0};
+static const float RW_TABLE_RPM[RW_TABLE_N] = {0.0,  0.0,    57.0,   142.0,  231.0, 279.0, 410.0};
+#define WHL_KP                  0.5    // wanted body accel per deg of heading error (deg/s^2 per deg)
+#define WHL_KD                  1.2    // wanted body accel per deg/s of body rate (deg/s^2 per deg/s)
+#define WHL_COUPLING            0.12   // body accel (deg/s^2) per RPM/s of RW speed change; flip the sign if the RW turns the sat the wrong way
+#define WHL_MAX_ACCEL_RPMS      30.0   // cap on RW speed target change (RPM/s)
+#define WHL_TRIM_GAIN           2.0    // RW speed loop: trim change per RPM of speed error per second (1/s)
+#define WHL_TRIM_MAX_RPM        150.0  // RW speed loop trim limit (RPM)
+#define WHL_FILTER_TAU_S        0.2    // averaging on gyro rate and measured RW speed (s)
+#define WHL_DONE_RPM            60.0   // dump phase ends below this RW speed; the wheel stalls near here anyway
+#define WHL_MAX_DUMP_MS         300000 // dump phase safety limit (ms)
+
 // Magnetic heading hold (cmd 16): same controller as cmd 15, heading from the magnetometer.
 #define MAG_OFFSET_X_UT         -50.52 // hard-iron offset of mag X (uT); avg of 2026-11-03 cmd 16 calibrations (-50.55, -50.47); recalibrate with cmd 16 C
 #define MAG_OFFSET_Y_UT         -27.41 // hard-iron offset of mag Y (uT); avg of -27.52 and -27.30 (a third run gave -42.45, treated as an incomplete turn)

@@ -53,6 +53,7 @@
  * | 15  | Lab 8: Closed-loop heading hold on integrated gyro ('Z' re-zero target, 'X' end) |
  * | 16  | Lab 8: Closed-loop heading hold on magnetometer heading ('Z' re-zero target, 'X' end) |
  * | 17  | Lab 8: Closed-loop RW momentum dump (RW slows only while the thrusters hold the magnetic heading) |
+ * | 18  | Lab 8: Wheel-held momentum dump (RW holds the magnetic heading while a thruster drains its momentum) |
  * | 98  | SD Card: List files (USB Serial only) |
  * | 99  | SD Card: Print file menu (USB Serial only) |
  * 
@@ -67,6 +68,7 @@
  * - **Lab 8 Hold**: measures gyro bias, then fires thrusters to hold the starting heading (integrated gyro) until 'X'
  * - **Lab 8 Mag Hold**: optional magnetometer calibration spin, then fires thrusters to hold the starting magnetic heading until 'X'
  * - **Lab 8 CL Dump**: RW spun to a chosen speed, release on blue LED, RW slowed only while the thrusters hold the starting magnetic heading
+ * - **Lab 8 Wheel Dump**: RW spun to a chosen speed, release on blue LED, RW holds heading while one thruster pushes steadily so the wheel slows
  * 
  * @section datalog Data Logging Format
  * All test data is logged to SD card in CSV format with:
@@ -165,6 +167,7 @@ void lab8_data_log();
 void lab8_heading_hold();
 void lab8_mag_heading_hold();
 void lab8_closed_loop_dump();
+void lab8_wheel_hold_dump();
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // SETUP:
@@ -384,6 +387,7 @@ void process_main_menu() {
       Xbee.print("15 - Lab 8: Closed-Loop Heading Hold\n");
       Xbee.print("16 - Lab 8: Closed-Loop Magnetic Heading Hold\n");
       Xbee.print("17 - Lab 8: Closed-Loop RW Momentum Dump\n");
+      Xbee.print("18 - Lab 8: Wheel-Held Momentum Dump\n");
       Xbee.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Xbee.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       
@@ -405,6 +409,7 @@ void process_main_menu() {
       Serial.print("15 - Lab 8: Closed-Loop Heading Hold\n");
       Serial.print("16 - Lab 8: Closed-Loop Magnetic Heading Hold\n");
       Serial.print("17 - Lab 8: Closed-Loop RW Momentum Dump\n");
+      Serial.print("18 - Lab 8: Wheel-Held Momentum Dump\n");
       Serial.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Serial.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       break;
@@ -473,6 +478,10 @@ void process_main_menu() {
 
     case 17:
       lab8_closed_loop_dump();
+      break;
+
+    case 18:
+      lab8_wheel_hold_dump();
       break;
 
     case 98:
@@ -2267,5 +2276,211 @@ void lab8_closed_loop_dump() {
       dataFile.flush();
       Serial.println(row);
     }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Wheel-Held Momentum Dump
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Measured RW speed (RPM) for a PWM command, from the RW_TABLE_* curve in definitions.h.
+ */
+static float lab8_rw_rpm_from_pwm(float pwm) {
+  if (pwm <= RW_TABLE_PWM[0]) return RW_TABLE_RPM[0];
+  for (int i = 1; i < RW_TABLE_N; i++) {
+    if (pwm <= RW_TABLE_PWM[i]) {
+      float f = (pwm - RW_TABLE_PWM[i - 1]) / (RW_TABLE_PWM[i] - RW_TABLE_PWM[i - 1]);
+      return RW_TABLE_RPM[i - 1] + f * (RW_TABLE_RPM[i] - RW_TABLE_RPM[i - 1]);
+    }
+  }
+  return RW_TABLE_RPM[RW_TABLE_N - 1];
+}
+
+/**
+ * @brief PWM command (0 to 1) that gives a RW speed (RPM), the inverse of lab8_rw_rpm_from_pwm().
+ */
+static float lab8_rw_pwm_from_rpm(float rpm) {
+  if (rpm <= 0.0f) return 0.0f;
+  for (int i = 1; i < RW_TABLE_N; i++) {
+    if (rpm <= RW_TABLE_RPM[i] && RW_TABLE_RPM[i] > RW_TABLE_RPM[i - 1]) {
+      float f = (rpm - RW_TABLE_RPM[i - 1]) / (RW_TABLE_RPM[i] - RW_TABLE_RPM[i - 1]);
+      return RW_TABLE_PWM[i - 1] + f * (RW_TABLE_PWM[i] - RW_TABLE_PWM[i - 1]);
+    }
+  }
+  return 1.0f;
+}
+
+/**
+ * @brief Dumps RW momentum the way real spacecraft do: the RW holds the magnetic heading while one
+ *        thruster pushes steadily, so the wheel has to slow down to keep KestrelSAT pointed.
+ *
+ * Profile (phase column):
+ *  - 1: 0-10 s hold KestrelSAT by hand while the RW spins up to the chosen speed (LED white).
+ *       Over the last 3 s the gyro bias, mag X/Y and RW speed are averaged; that magnetic heading is the target.
+ *  - 2: 10-13 s release KestrelSAT when the LED turns blue; RW holds that speed
+ *  - 3: wheel-held dump (LED teal) while the measured RW speed is above WHL_DONE_RPM (max WHL_MAX_DUMP_MS)
+ *  - 4: RW off; thrusters hold the heading (cmd 16 controller) for 20 s to take out the last stall kick
+ *
+ * Every 50 ms in phase 3:
+ *  - Thruster: the fan that makes the wheel slow down is on full (+Z fan while the RW spins positive).
+ *  - Heading loop: wanted body accel a = WHL_KP * error - WHL_KD * rate (gyro_Z sign, deg/s^2).
+ *    The RW speed target changes by (a - fan accel) / WHL_COUPLING RPM/s, capped at WHL_MAX_ACCEL_RPMS.
+ *    WHL_COUPLING is the body accel per RPM/s of wheel speed change (0.12 from the cldump_data002 log).
+ *  - Wheel speed loop: PWM comes from the RW_TABLE_* speed curve at (target + trim), and the trim (RPM)
+ *    integrates the measured speed error at WHL_TRIM_GAIN per second. The curve is very nonlinear
+ *    (most of the speed is lost in the last few percent of PWM), so a plain PWM gain would not work.
+ * Progress is printed every 5 s. 'X' aborts with the RW and fans stopped.
+ * Logs the standard Lab 8 columns plus magnetic heading, target and RW speed target.
+ */
+void lab8_wheel_hold_dump() {
+  int start_pct = lab8_prompt_int("Enter starting RW speed in percent (1 to 100):");
+  start_pct = constrain(start_pct, 1, 100);
+  const float rw_start = start_pct / 100.0f;
+  const uint32_t SPINUP_MS = 10000;
+  const uint32_t CAL_START_MS = 7000;   // average bias, heading and RW speed over 7-10 s, while still held
+  const uint32_t RELEASE_MS = 3000;
+  const uint32_t HOLD_END_MS = 20000;
+  const uint32_t DUMP_START = SPINUP_MS + RELEASE_MS;
+
+  if (!sd_createDataFile(&dataFile, "Lab8_whldump")) {
+    lab8_println("[ERROR] Failed to create data file. Aborting test.");
+    return;
+  }
+  dataFile.print(LAB8_HEADER);
+  dataFile.println(",mag_heading(deg),target(deg),w_RW_target(RPM)");
+  dataFile.flush();
+  char file_name[40];
+  dataFile.getName(file_name, sizeof(file_name));
+  Xbee.print("[INFO] Data file created successfully: ");
+  Xbee.println(file_name);
+  Serial.print("[INFO] Data file created successfully: ");
+  Serial.println(file_name);
+  lab8_println("[INFO] Point KestrelSAT at the heading to hold, hold it still, then send any key. Release when LED turns BLUE (send 'X' to abort)...");
+  lab8_wait_for_key();
+
+  neopixelWrite(RGB_BUILTIN, 255, 255, 255); // Set to white (R=255, G=255, B=255)
+  uint32_t t0 = millis();
+  timeNext_testPoint = t0;
+  float rw_pwm = rw_start;
+  float bias_sum = 0.0, mx_sum = 0.0, my_sum = 0.0, rpm_sum = 0.0;
+  uint32_t n_cal = 0;
+  float bias = 0.0;
+  float mx_f = 0.0, my_f = 0.0;   // filtered mag X/Y (uT)
+  float heading = 0.0, target = 0.0;
+  float rate_f = 0.0;             // averaged body rate, bias removed (deg/s)
+  float rpm_f = 0.0;              // averaged measured RW speed (RPM)
+  float w_target = 0.0;           // RW speed target (RPM)
+  float w_trim = 0.0;             // speed-loop trim added to the target before the curve lookup (RPM)
+  int fan_state = 0;              // +1 = +Z fan on, -1 = -Z fan on, 0 = off
+  int phase = 1;
+  uint32_t t_phase4 = 0;
+  uint32_t t_next_report = 0;
+  char msg[160];
+  thrusters_off();
+  driver.setOutput(rw_pwm);
+  while (true) {
+    if (lab8_abort_requested()) {
+      lab8_end_test("[CAUTION] Test Canceled Early. File closed.");
+      return;
+    }
+    uint32_t t = millis() - t0;
+    if (millis() <= timeNext_testPoint) continue;
+    timeNext_testPoint += interval_testPoint;
+    float dt = interval_testPoint / 1000.0f;
+
+    lab8_read_imu();
+    float w_RW_meas = lab8_measure_RW_rpm();
+    rpm_f += dt / (WHL_FILTER_TAU_S + dt) * (w_RW_meas - rpm_f);
+    rate_f += dt / (WHL_FILTER_TAU_S + dt) * ((gyro_Z - bias) - rate_f);
+
+    // Phase changes:
+    if (phase == 1 && t >= CAL_START_MS) {
+      bias_sum += gyro_Z;
+      mx_sum += mag_X;
+      my_sum += mag_Y;
+      rpm_sum += w_RW_meas;
+      n_cal++;
+    }
+    if (phase == 1 && t >= SPINUP_MS) {
+      phase = 2;
+      bias = (n_cal > 0) ? bias_sum / n_cal : 0.0;
+      mx_f = (n_cal > 0) ? mx_sum / n_cal : mag_X;
+      my_f = (n_cal > 0) ? my_sum / n_cal : mag_Y;
+      rpm_f = (n_cal > 0) ? rpm_sum / n_cal : w_RW_meas;
+      rate_f = 0.0;
+      target = lab8_mag_heading(mx_f, my_f, MAG_OFFSET_X_UT, MAG_OFFSET_Y_UT);
+      heading = target;
+      neopixelWrite(RGB_BUILTIN, 0, 0, 255); // Set to blue (R=0, G=0, B=255): release KestrelSAT
+      snprintf(msg, sizeof(msg), "[INFO] Gyro bias = %.3f deg/s, target heading = %.1f deg, RW = %.0f RPM. Release KestrelSAT now.",
+               bias, target, rpm_f);
+      lab8_println(msg);
+    } else if (phase == 2 && t >= DUMP_START) {
+      phase = 3;
+      w_target = rpm_f;
+      w_trim = lab8_rw_rpm_from_pwm(rw_pwm) - rpm_f;   // so the first PWM equals the spin-up PWM
+      t_next_report = t;
+      neopixelWrite(RGB_BUILTIN, 0, 128, 128); // Set to teal (R=0, G=128, B=128)
+      lab8_println("[INFO] Wheel-held dump started.");
+    } else if (phase == 3 && (rpm_f < WHL_DONE_RPM || t - DUMP_START >= WHL_MAX_DUMP_MS)) {
+      phase = 4;
+      t_phase4 = t;
+      rw_pwm = 0.0;
+      fan_state = 0;
+      snprintf(msg, sizeof(msg), "[INFO] RW at %.0f RPM. RW off; thrusters holding heading for 20 s.", rpm_f);
+      lab8_println(msg);
+    } else if (phase == 4 && t - t_phase4 >= HOLD_END_MS) {
+      lab8_end_test("[INFO] Wheel-Held Momentum Dump Complete. File closed.");
+      return;
+    }
+
+    // Heading:
+    float error = 0.0;
+    if (phase >= 2) {
+      float a = dt / (MAG_FILTER_TAU_S + dt);
+      mx_f += a * (mag_X - mx_f);
+      my_f += a * (mag_Y - my_f);
+      heading = lab8_mag_heading(mx_f, my_f, MAG_OFFSET_X_UT, MAG_OFFSET_Y_UT);
+      error = lab8_wrap180(target - heading);
+    }
+    float err_g = MAG_HEADING_SIGN * error;   // heading error in the gyro_Z sign convention
+
+    if (phase == 3) {
+      // Thruster pushes steadily so the wheel must slow to hold the heading:
+      fan_state = (rpm_f > 0.0f) ? 1 : -1;
+      thrusters_set((float)fan_state);
+
+      // Heading loop -> RW speed target:
+      float a_des = WHL_KP * err_g - WHL_KD * rate_f;
+      float w_dot = (a_des - HOLD_ALPHA_DPS2 * fan_state) / WHL_COUPLING;
+      w_dot = constrain(w_dot, -WHL_MAX_ACCEL_RPMS, WHL_MAX_ACCEL_RPMS);
+      w_target += w_dot * dt;
+
+      // Wheel speed loop -> PWM through the speed curve:
+      w_trim += WHL_TRIM_GAIN * (w_target - rpm_f) * dt;
+      w_trim = constrain(w_trim, -WHL_TRIM_MAX_RPM, WHL_TRIM_MAX_RPM);
+      rw_pwm = constrain(lab8_rw_pwm_from_rpm(w_target + w_trim), 0.0f, 1.0f);
+
+      if (t >= t_next_report) {
+        t_next_report += 5000;
+        snprintf(msg, sizeof(msg), "[INFO] t = %lu s, RW %.0f RPM (target %.0f), PWM %.1f%%, heading error %.1f deg, rate %.2f deg/s",
+                 (unsigned long)(t / 1000), rpm_f, w_target, rw_pwm * 100.0f, error, rate_f);
+        lab8_println(msg);
+      }
+    } else if (phase == 4) {
+      float u;
+      fan_state = lab8_hold_fan_state(err_g, rate_f, fan_state, CLDUMP_FAN_ON_DEG, MAG_HOLD_CENTER_DEG, &u);
+      thrusters_set((float)fan_state);
+    }
+    driver.setOutput(rw_pwm);
+
+    // Log the standard Lab 8 row plus heading, target and RW speed target:
+    float w_RW_cmd = -rw_pwm * 1000.0 * MOTOR_VOLTAGE / 12.0; // same scaling as Lab 7
+    char row[200];
+    snprintf(row, sizeof(row), "%lu,%.3f,%.3f,%.3f,%.1f,%.1f,%.3f,%.3f,%d,%.2f,%.2f,%.1f",
+             (unsigned long)t, gyro_Z, mag_X, mag_Y, w_RW_cmd, w_RW_meas,
+             thrusters_get_plusZ(), thrusters_get_minusZ(), phase, heading, target, w_target);
+    dataFile.println(row);
+    dataFile.flush();
+    Serial.println(row);
   }
 }
