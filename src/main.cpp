@@ -1814,7 +1814,8 @@ static int lab8_hold_fan_state(float error, float rate, int fan_state, float on_
  *     and turns the fan off once u is within HOLD_DEADBAND_OFF_DEG of the target or past it.
  *
  * Keys during the test: 'Z' re-zeros the target to the current heading, 'X' ends the test.
- * Assumes the +Z fan makes gyro_Z positive (check with cmd 14: press '1', gyro_Z should go up).
+ * fan_state is the direction to push gyro_Z (+1 = make gyro_Z go up). HOLD_FAN_SIGN maps it to the fan that does that:
+ * +1 if the +Z fan (cmd 14 key '1') makes gyro_Z go up, -1 if it makes gyro_Z go down.
  * Logs to SD every 50 ms: time, gyro Z, heading, error, prediction u, mag X/Y, fan states.
  */
 void lab8_heading_hold() {
@@ -1889,7 +1890,8 @@ void lab8_heading_hold() {
     float error = lab8_wrap180(target - heading);
     float u;
     fan_state = lab8_hold_fan_state(error, rate, fan_state, HOLD_DEADBAND_ON_DEG, HOLD_DEADBAND_OFF_DEG, &u);
-    thrusters_set((float)fan_state);
+    int fan_cmd = (int)HOLD_FAN_SIGN * fan_state; // which physical fan pushes gyro_Z the way fan_state asks
+    thrusters_set((float)fan_cmd);
 
     // Record test point:
     if (millis() > timeNext_testPoint) {
@@ -1897,7 +1899,7 @@ void lab8_heading_hold() {
       float time_s = (millis() - t0) / 1000.0f;
       char row[128];
       snprintf(row, sizeof(row), "%.3f,%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d", time_s, rate, heading, error, u,
-               mag_X, mag_Y, fan_state > 0 ? 1 : 0, fan_state < 0 ? 1 : 0);
+               mag_X, mag_Y, fan_cmd > 0 ? 1 : 0, fan_cmd < 0 ? 1 : 0);
       dataFile.println(row);
       dataFile.flush();
       Serial.println(row);
@@ -2053,7 +2055,8 @@ void lab8_mag_heading_hold() {
     float error = lab8_wrap180(target - heading);
     float u;
     fan_state = lab8_hold_fan_state(MAG_HEADING_SIGN * error, rate, fan_state, MAG_HOLD_BAND_DEG, MAG_HOLD_CENTER_DEG, &u);
-    thrusters_set((float)fan_state);
+    int fan_cmd = (int)HOLD_FAN_SIGN * fan_state; // which physical fan pushes gyro_Z the way fan_state asks
+    thrusters_set((float)fan_cmd);
 
     // Record test point:
     if (millis() > timeNext_testPoint) {
@@ -2061,7 +2064,7 @@ void lab8_mag_heading_hold() {
       float time_s = (millis() - t0) / 1000.0f;
       char row[144];
       snprintf(row, sizeof(row), "%.3f,%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d", time_s, rate, heading, target, error, u,
-               mag_X, mag_Y, fan_state > 0 ? 1 : 0, fan_state < 0 ? 1 : 0);
+               mag_X, mag_Y, fan_cmd > 0 ? 1 : 0, fan_cmd < 0 ? 1 : 0);
       dataFile.println(row);
       dataFile.flush();
       Serial.println(row);

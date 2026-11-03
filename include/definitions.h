@@ -42,6 +42,7 @@
 #define HOLD_DEADBAND_OFF_DEG   0.5    // turn the fan off when predicted error falls below this (deg)
 #define HOLD_BIAS_CAL_MS        3000   // time KestrelSAT is held still to measure gyro bias (ms)
 #define HOLD_MIN_OFF_MS         500    // after a fan turns off, neither fan fires for this long (ms); lets it spin down
+#define HOLD_FAN_SIGN           -1     // +1 if the +Z fan makes gyro_Z go up, -1 if it makes gyro_Z go down (2026-11-03 cmd 16 test: -Z fan ran away, so -1)
 
 // Magnetic heading hold (cmd 16): same controller as cmd 15, heading from the magnetometer.
 #define MAG_OFFSET_X_UT         -50.52 // hard-iron offset of mag X (uT); avg of 2026-11-03 cmd 16 calibrations (-50.55, -50.47); recalibrate with cmd 16 C
