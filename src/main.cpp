@@ -1772,22 +1772,31 @@ static float lab8_wrap180(float deg) {
 /**
  * @brief Bang-bang thruster decision on the predicted stopping error (shared by cmds 15 and 16).
  *
+ * A fan fires when |u| exceeds on_deg. It turns off as soon as u comes back within off_deg of the
+ * target or crosses past it, so a noisy u cannot skip over a narrow off window and keep the fan on.
+ * The fans never switch straight from one to the other: after a fan turns off, neither fan may fire
+ * for HOLD_MIN_OFF_MS, which lets the first fan spin down so both are never running together.
+ *
  * @param error     heading error target - heading (deg), in the gyro_Z sign convention
  * @param rate      body rate gyro_Z - bias (deg/s)
  * @param fan_state previous fan state (+1 = +Z fan, -1 = -Z fan, 0 = off)
  * @param on_deg    fire a fan when |u| exceeds this (deg)
- * @param off_deg   turn the fan off once |u| falls below this (deg)
+ * @param off_deg   turn the fan off once u is within this of the target or past it (deg)
  * @param u_out     returns the predicted stopping error u (deg)
  * @return new fan state
  */
 static int lab8_hold_fan_state(float error, float rate, int fan_state, float on_deg, float off_deg, float *u_out) {
+  static uint32_t t_off = 0;
   float u = error - rate * fabs(rate) / (2.0f * HOLD_ALPHA_DPS2) - rate * HOLD_FAN_LAG_S;
-  if (u > on_deg) {
-    fan_state = 1;
-  } else if (u < -on_deg) {
-    fan_state = -1;
-  } else if (fabs(u) < off_deg) {
+  if (fan_state == 1 && u < off_deg) {
     fan_state = 0;
+    t_off = millis();
+  } else if (fan_state == -1 && u > -off_deg) {
+    fan_state = 0;
+    t_off = millis();
+  } else if (fan_state == 0 && millis() - t_off >= HOLD_MIN_OFF_MS) {
+    if (u > on_deg) fan_state = 1;
+    else if (u < -on_deg) fan_state = -1;
   }
   *u_out = u;
   return fan_state;
@@ -1802,7 +1811,7 @@ static int lab8_hold_fan_state(float error, float rate, int fan_state, float on_
  *  3. Every loop: heading += (gyro_Z - bias) * dt. The controller predicts the stopping error
  *       u = error - rate*|rate| / (2*HOLD_ALPHA_DPS2) - rate*HOLD_FAN_LAG_S
  *     and fires the +Z fan if u > HOLD_DEADBAND_ON_DEG, the -Z fan if u < -HOLD_DEADBAND_ON_DEG,
- *     and turns the fan off once |u| < HOLD_DEADBAND_OFF_DEG (hysteresis stops chatter).
+ *     and turns the fan off once u is within HOLD_DEADBAND_OFF_DEG of the target or past it.
  *
  * Keys during the test: 'Z' re-zeros the target to the current heading, 'X' ends the test.
  * Assumes the +Z fan makes gyro_Z positive (check with cmd 14: press '1', gyro_Z should go up).
@@ -1927,7 +1936,7 @@ static float lab8_mag_heading(float mx, float my, float off_x, float off_y) {
  *     computed, error = wrap180(target - heading) is converted to the gyro sign with MAG_HEADING_SIGN,
  *     and the cmd 15 bang-bang controller picks the fan. The fans stay off while the predicted stop is
  *     within +/-MAG_HOLD_BAND_DEG (5 deg) of the target; once it is outside, a fan pushes KestrelSAT
- *     back until the predicted stop is within MAG_HOLD_CENTER_DEG of the target (back to center).
+ *     back until the predicted stop is within MAG_HOLD_CENTER_DEG of the target or past it (back to center).
  *
  * Keys during the test: 'Z' re-zeros the target to the current magnetic heading, 'X' ends the test.
  * If KestrelSAT turns away from the target instead of back to it, flip MAG_HEADING_SIGN in definitions.h.
