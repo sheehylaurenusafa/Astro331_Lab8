@@ -52,6 +52,7 @@
  * | 14  | Lab 8: Data log (time, gyro Z, mag X/Y, fan states, RW cmd/meas) with manual fan control ('1'/'2' toggle fans, '0' fans off, 'X' end) |
  * | 15  | Lab 8: Closed-loop heading hold on integrated gyro ('Z' re-zero target, 'X' end) |
  * | 16  | Lab 8: Closed-loop heading hold on magnetometer heading ('Z' re-zero target, 'X' end) |
+ * | 17  | Lab 8: Closed-loop RW momentum dump (RW slows only as fast as the thrusters keep the body still) |
  * | 98  | SD Card: List files (USB Serial only) |
  * | 99  | SD Card: Print file menu (USB Serial only) |
  * 
@@ -65,6 +66,7 @@
  * - **Lab 8 Log**: logs time, gyro Z and both fan on/off states until 'X'; fans toggled by key during the test
  * - **Lab 8 Hold**: measures gyro bias, then fires thrusters to hold the starting heading (integrated gyro) until 'X'
  * - **Lab 8 Mag Hold**: optional magnetometer calibration spin, then fires thrusters to hold the starting magnetic heading until 'X'
+ * - **Lab 8 CL Dump**: RW spun to a chosen speed, release on blue LED, RW slowed only while the thrusters hold the body rate near 0
  * 
  * @section datalog Data Logging Format
  * All test data is logged to SD card in CSV format with:
@@ -162,6 +164,7 @@ void lab8_momentum_dump();
 void lab8_data_log();
 void lab8_heading_hold();
 void lab8_mag_heading_hold();
+void lab8_closed_loop_dump();
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // SETUP:
@@ -380,6 +383,7 @@ void process_main_menu() {
       Xbee.print("14 - Lab 8: Data Log with Fan Control\n");
       Xbee.print("15 - Lab 8: Closed-Loop Heading Hold\n");
       Xbee.print("16 - Lab 8: Closed-Loop Magnetic Heading Hold\n");
+      Xbee.print("17 - Lab 8: Closed-Loop RW Momentum Dump\n");
       Xbee.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Xbee.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       
@@ -400,6 +404,7 @@ void process_main_menu() {
       Serial.print("14 - Lab 8: Data Log with Fan Control\n");
       Serial.print("15 - Lab 8: Closed-Loop Heading Hold\n");
       Serial.print("16 - Lab 8: Closed-Loop Magnetic Heading Hold\n");
+      Serial.print("17 - Lab 8: Closed-Loop RW Momentum Dump\n");
       Serial.print("98 - SD Card: List Files (USB SERIAL ONLY)\n");
       Serial.print("99 - SD Card: Print File Menu (USB SERIAL ONLY)\n");
       break;
@@ -464,6 +469,10 @@ void process_main_menu() {
 
     case 16:
       lab8_mag_heading_hold();
+      break;
+
+    case 17:
+      lab8_closed_loop_dump();
       break;
 
     case 98:
@@ -2075,6 +2084,125 @@ void lab8_mag_heading_hold() {
       dataFile.flush();
       Serial.println(row);
       if (xbee_row_count++ % 4 == 0) Xbee.println(row); // XBee gets every 4th row (5 Hz)
+    }
+  }
+}
+
+/*---------------------------------------------------------------------------------------------*/
+// Lab 8: Closed-Loop Reaction Wheel Momentum Dump
+/*---------------------------------------------------------------------------------------------*/
+/**
+ * @brief Slows the RW to zero only as fast as the thrusters can keep KestrelSAT's body rate near zero.
+ *
+ * Profile (phase column):
+ *  - 1: 0-10 s hold KestrelSAT by hand while the RW spins up to the chosen speed (LED white)
+ *  - 2: 10-13 s release KestrelSAT when the LED turns blue; RW holds that speed
+ *  - 3: closed-loop spin-down (LED pink) until the RW command reaches 0
+ *  - 4: 15 s more of rate damping with the RW off
+ *
+ * Every 50 ms in phase 3:
+ *  - The body rate is gyro Z averaged over DUMP_RATE_TAU_S.
+ *  - Thrusters: the fan that opposes the spin runs at full power once |rate| > CLDUMP_FAN_ON_DPS and
+ *    turns off when the rate falls below CLDUMP_FAN_OFF_DPS or reverses.
+ *  - RW: the command steps down by up to CLDUMP_MAX_RAMP_PCT_S, scaled by how still the body is:
+ *    full step while |rate| < CLDUMP_RATE_OK_DPS, shrinking to no step at CLDUMP_RATE_LIMIT_DPS.
+ *    So the wheel waits whenever the fans fall behind, and the spin-down takes as long as the fans need.
+ * Progress (RW %, body rate) is printed every 10 s. 'X' aborts with the RW and fans stopped.
+ */
+void lab8_closed_loop_dump() {
+  int start_pct = lab8_prompt_int("Enter starting RW speed in percent (10 to 100):");
+  start_pct = constrain(start_pct, 10, 100);
+  const float rw_start = start_pct / 100.0f;
+  const uint32_t SPINUP_MS = 10000;
+  const uint32_t RELEASE_MS = 3000;
+  const uint32_t DAMP_MS = 15000;
+  const uint32_t RAMP_START = SPINUP_MS + RELEASE_MS;
+
+  if (!lab8_open_file("Lab8_cldump")) return;
+  lab8_println("[INFO] Hold KestrelSAT still, then send any key to begin. Release when LED turns BLUE (send 'X' to abort)...");
+  lab8_wait_for_key();
+
+  neopixelWrite(RGB_BUILTIN, 255, 255, 255); // Set to white (R=255, G=255, B=255)
+  uint32_t t0 = millis();
+  timeNext_testPoint = t0;
+  bool released = false;
+  bool ramping = false;
+  uint32_t t_ramp_done = 0;   // time the RW command reached 0 (ms since t0)
+  uint32_t t_next_report = 0;
+  float rw_pwm = rw_start;
+  float rate_f = 0.0;         // averaged body rate (deg/s)
+  int fan_state = 0;          // +1 = +Z fan on, -1 = -Z fan on, 0 = off
+  int phase = 1;
+  while (true) {
+    if (lab8_abort_requested()) {
+      lab8_end_test("[CAUTION] Test Canceled Early. File closed.");
+      return;
+    }
+
+    uint32_t t = millis() - t0;
+    if (t < SPINUP_MS) {
+      phase = 1;
+    } else if (t < RAMP_START) {
+      phase = 2;
+      if (!released) {
+        released = true;
+        neopixelWrite(RGB_BUILTIN, 0, 0, 255); // Set to blue (R=0, G=0, B=255): release KestrelSAT
+        lab8_println("[INFO] Release KestrelSAT now.");
+      }
+    } else if (rw_pwm > 0.0f) {
+      phase = 3;
+      if (!ramping) {
+        ramping = true;
+        t_next_report = t;
+        neopixelWrite(RGB_BUILTIN, 255, 64, 160); // Set to pink (R=255, G=64, B=160)
+        lab8_println("[INFO] Closed-loop spin-down started.");
+      }
+    } else {
+      phase = 4;
+      if (t_ramp_done == 0) {
+        t_ramp_done = t;
+        lab8_println("[INFO] RW command at 0. Damping body rate for 15 s.");
+      }
+      if (t - t_ramp_done >= DAMP_MS) {
+        lab8_end_test("[INFO] Closed-Loop Momentum Dump Complete. File closed.");
+        return;
+      }
+    }
+    driver.setOutput(rw_pwm);
+
+    if (millis() > timeNext_testPoint) {
+      timeNext_testPoint += interval_testPoint;
+      float dt = interval_testPoint / 1000.0f;
+      rate_f += dt / (DUMP_RATE_TAU_S + dt) * (gyro_Z - rate_f);
+
+      if (phase >= 3) {
+        // Thrusters: full-power fan against the averaged body rate.
+        if (fan_state == 0) {
+          if (rate_f > CLDUMP_FAN_ON_DPS) fan_state = -1;        // spinning +Z: -Z fan slows it
+          else if (rate_f < -CLDUMP_FAN_ON_DPS) fan_state = 1;   // spinning -Z: +Z fan slows it
+        } else if (fan_state == -1 && rate_f < CLDUMP_FAN_OFF_DPS) {
+          fan_state = 0;
+        } else if (fan_state == 1 && rate_f > -CLDUMP_FAN_OFF_DPS) {
+          fan_state = 0;
+        }
+        thrusters_set((float)fan_state);
+      }
+
+      if (phase == 3) {
+        // RW: step down only as far as the body stays still.
+        float scale = (CLDUMP_RATE_LIMIT_DPS - fabs(rate_f)) / (CLDUMP_RATE_LIMIT_DPS - CLDUMP_RATE_OK_DPS);
+        scale = constrain(scale, 0.0f, 1.0f);
+        rw_pwm -= CLDUMP_MAX_RAMP_PCT_S / 100.0f * dt * scale;
+        if (rw_pwm < 0.0f) rw_pwm = 0.0f;
+        if (t >= t_next_report) {
+          t_next_report += 10000;
+          char msg[96];
+          snprintf(msg, sizeof(msg), "[INFO] t = %lu s, RW at %.1f%%, body rate %.2f deg/s", (unsigned long)(t / 1000), rw_pwm * 100.0f, rate_f);
+          lab8_println(msg);
+        }
+      }
+
+      lab8_log_row(t, rw_pwm, phase);
     }
   }
 }

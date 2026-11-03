@@ -48,6 +48,13 @@
 #define DUMP_ON_DPS             2.0    // fire the opposing fan when |averaged rate| exceeds this (deg/s)
 #define DUMP_OFF_DPS            0.5    // turn it off when the rate falls below this or reverses (deg/s)
 
+// Closed-loop RW momentum dump (cmd 17): the RW slows only while the thrusters keep the body still.
+#define CLDUMP_MAX_RAMP_PCT_S   0.5    // fastest RW spin-down, percent of full command per second
+#define CLDUMP_RATE_OK_DPS      0.5    // full-speed spin-down while |averaged body rate| is below this (deg/s)
+#define CLDUMP_RATE_LIMIT_DPS   2.0    // spin-down pauses when |averaged body rate| reaches this (deg/s)
+#define CLDUMP_FAN_ON_DPS       1.0    // fire the opposing fan above this |averaged body rate| (deg/s)
+#define CLDUMP_FAN_OFF_DPS      0.3    // turn it off below this rate or when the rate reverses (deg/s)
+
 // Magnetic heading hold (cmd 16): same controller as cmd 15, heading from the magnetometer.
 #define MAG_OFFSET_X_UT         -50.52 // hard-iron offset of mag X (uT); avg of 2026-11-03 cmd 16 calibrations (-50.55, -50.47); recalibrate with cmd 16 C
 #define MAG_OFFSET_Y_UT         -27.41 // hard-iron offset of mag Y (uT); avg of -27.52 and -27.30 (a third run gave -42.45, treated as an incomplete turn)
