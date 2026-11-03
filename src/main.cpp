@@ -2319,7 +2319,7 @@ static float lab8_rw_pwm_from_rpm(float rpm) {
  *       Over the last 3 s the gyro bias, mag X/Y and RW speed are averaged; that magnetic heading is the target.
  *  - 2: 10-13 s release KestrelSAT when the LED turns blue; RW holds that speed
  *  - 3: wheel-held dump (LED teal) while the measured RW speed is above WHL_DONE_RPM (max WHL_MAX_DUMP_MS)
- *  - 4: RW off; thrusters hold the heading (cmd 16 controller) for 20 s to take out the last stall kick
+ *  - 4: RW off; thrusters keep holding the target heading (cmd 16 controller) until 'X' is sent
  *
  * Every 50 ms in phase 3:
  *  - Thruster: the fan that makes the wheel slow down is on full (+Z fan while the RW spins positive).
@@ -2329,7 +2329,7 @@ static float lab8_rw_pwm_from_rpm(float rpm) {
  *  - Wheel speed loop: PWM comes from the RW_TABLE_* speed curve at (target + trim), and the trim (RPM)
  *    integrates the measured speed error at WHL_TRIM_GAIN per second. The curve is very nonlinear
  *    (most of the speed is lost in the last few percent of PWM), so a plain PWM gain would not work.
- * Progress is printed every 5 s. 'X' aborts with the RW and fans stopped.
+ * Progress is printed every 5 s. 'X' ends the test with the RW and fans stopped (in phase 4 that is the normal end).
  * Logs the standard Lab 8 columns plus magnetic heading, target and RW speed target.
  */
 void lab8_wheel_hold_dump() {
@@ -2339,7 +2339,6 @@ void lab8_wheel_hold_dump() {
   const uint32_t SPINUP_MS = 10000;
   const uint32_t CAL_START_MS = 7000;   // average bias, heading and RW speed over 7-10 s, while still held
   const uint32_t RELEASE_MS = 3000;
-  const uint32_t HOLD_END_MS = 20000;
   const uint32_t DUMP_START = SPINUP_MS + RELEASE_MS;
 
   if (!sd_createDataFile(&dataFile, "Lab8_whldump")) {
@@ -2373,14 +2372,15 @@ void lab8_wheel_hold_dump() {
   float w_trim = 0.0;             // speed-loop trim added to the target before the curve lookup (RPM)
   int fan_state = 0;              // +1 = +Z fan on, -1 = -Z fan on, 0 = off
   int phase = 1;
-  uint32_t t_phase4 = 0;
   uint32_t t_next_report = 0;
   char msg[160];
   thrusters_off();
   driver.setOutput(rw_pwm);
   while (true) {
     if (lab8_abort_requested()) {
-      lab8_end_test("[CAUTION] Test Canceled Early. File closed.");
+      lab8_end_test(phase == 4 ? "[INFO] Wheel-Held Momentum Dump Complete. File closed."
+                               : "[CAUTION] Test Canceled Early. File closed.");
+      neopixelWrite(RGB_BUILTIN, 0, 255, 0); // Set to green (R=0, G=255, B=0)
       return;
     }
     uint32_t t = millis() - t0;
@@ -2423,14 +2423,10 @@ void lab8_wheel_hold_dump() {
       lab8_println("[INFO] Wheel-held dump started.");
     } else if (phase == 3 && (rpm_f < WHL_DONE_RPM || t - DUMP_START >= WHL_MAX_DUMP_MS)) {
       phase = 4;
-      t_phase4 = t;
       rw_pwm = 0.0;
       fan_state = 0;
-      snprintf(msg, sizeof(msg), "[INFO] RW at %.0f RPM. RW off; thrusters holding heading for 20 s.", rpm_f);
+      snprintf(msg, sizeof(msg), "[INFO] Dump done (RW at %.0f RPM). RW off; thrusters holding heading until 'X'.", rpm_f);
       lab8_println(msg);
-    } else if (phase == 4 && t - t_phase4 >= HOLD_END_MS) {
-      lab8_end_test("[INFO] Wheel-Held Momentum Dump Complete. File closed.");
-      return;
     }
 
     // Heading:
