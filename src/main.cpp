@@ -61,7 +61,7 @@
  * - **Lab 7B**: 50-second dynamic test with prescribed motor speed profile (hold, ramp up/down cycles)
  * - **Lab 8 Sweep**: each fan held 5 s at 25/50/75/100% duty with 3 s off between steps (read thrust off a scale)
  * - **Lab 8 Slew**: 2 s idle, +Z burn, equal -Z burn to stop, then coast (open loop)
- * - **Lab 8 Dump**: RW spun to full speed, release on blue LED, RW ramped to zero while thrusters damp body rate
+ * - **Lab 8 Dump**: RW spun to a chosen speed, release on blue LED, RW ramped to zero while thrusters damp body rate
  * - **Lab 8 Log**: logs time, gyro Z and both fan on/off states until 'X'; fans toggled by key during the test
  * - **Lab 8 Hold**: measures gyro bias, then fires thrusters to hold the starting heading (integrated gyro) until 'X'
  * - **Lab 8 Mag Hold**: optional magnetometer calibration spin, then fires thrusters to hold the starting magnetic heading until 'X'
@@ -1582,23 +1582,27 @@ void lab8_thruster_slew() {
 // Lab 8: Reaction Wheel Momentum Dump
 /*---------------------------------------------------------------------------------------------*/
 /**
- * @brief Spins the RW to full speed, then slows it to zero while the thrusters hold the body still.
+ * @brief Spins the RW up, then slows it to zero while the thrusters hold the body still.
  *
  * Profile (phase column):
- *  - 1: 0-10 s hold KestrelSAT by hand while the RW spins up to 100% (LED white)
- *  - 2: 10-13 s release KestrelSAT when the LED turns blue; RW holds full speed
- *  - 3: RW command ramps from 100% to 0 over the ramp time; thrusters damp body rate
+ *  - 1: 0-10 s hold KestrelSAT by hand while the RW spins up to the chosen speed (LED white)
+ *  - 2: 10-13 s release KestrelSAT when the LED turns blue; RW holds that speed
+ *  - 3: RW command ramps from the chosen speed to 0 over the ramp time; thrusters damp body rate
  *  - 4: 15 s more of rate damping with the RW off
  *
- * Slowing the wheel moves its momentum into the body. The thrusters fire against the measured
- * body rate (gyro Z) to remove that momentum: full thrust at DUMP_FULL_RATE_DPS, nothing inside
- * DUMP_DEADBAND_DPS. This needs the +Z fan to really turn KestrelSAT +Z (check with cmd 10 first).
+ * Slowing the wheel moves its momentum into the body. The thrusters remove it by firing against the
+ * body rate (gyro Z, averaged over DUMP_RATE_TAU_S to ride out gyro noise). The fans are weak, so the
+ * opposing fan runs at full power once |rate| > DUMP_ON_DPS and turns off when the rate falls below
+ * DUMP_OFF_DPS or reverses. If the body still spins up, use a longer ramp or a lower starting RW speed.
  */
 void lab8_momentum_dump() {
-  const float DUMP_DEADBAND_DPS = 2.0;
-  const float DUMP_FULL_RATE_DPS = 20.0;
+  int start_pct = lab8_prompt_int("Enter starting RW speed in percent (10 to 100):");
+  start_pct = constrain(start_pct, 10, 100);
+  const float rw_start = start_pct / 100.0f;
   int ramp_s = lab8_prompt_int("Enter RW ramp-down time in seconds (5 to 900):");
   ramp_s = constrain(ramp_s, 5, 900);
+  float rate_f = 0.0;   // averaged body rate (deg/s)
+  int fan_state = 0;    // +1 = +Z fan on, -1 = -Z fan on, 0 = off
   const uint32_t SPINUP_MS = 10000;
   const uint32_t RELEASE_MS = 3000;
   const uint32_t RAMP_MS = (uint32_t)ramp_s * 1000;
@@ -1624,10 +1628,10 @@ void lab8_momentum_dump() {
     float rw_pwm;
     if (t < SPINUP_MS) {
       phase = 1;
-      rw_pwm = 1.0;
+      rw_pwm = rw_start;
     } else if (t < RAMP_START) {
       phase = 2;
-      rw_pwm = 1.0;
+      rw_pwm = rw_start;
       if (!released) {
         released = true;
         neopixelWrite(RGB_BUILTIN, 0, 0, 255); // Set to blue (R=0, G=0, B=255): release KestrelSAT
@@ -1635,7 +1639,7 @@ void lab8_momentum_dump() {
       }
     } else if (t < RAMP_START + RAMP_MS) {
       phase = 3;
-      rw_pwm = 1.0 - (float)(t - RAMP_START) / RAMP_MS;
+      rw_pwm = rw_start * (1.0f - (float)(t - RAMP_START) / RAMP_MS);
     } else if (t < RAMP_START + RAMP_MS + DAMP_MS) {
       phase = 4;
       rw_pwm = 0.0;
@@ -1648,14 +1652,19 @@ void lab8_momentum_dump() {
     if (millis() > timeNext_testPoint) {
       timeNext_testPoint += interval_testPoint;
 
-      // Rate damping with thrusters (phases 3 and 4 only), using the latest gyro reading:
+      // Rate damping with thrusters (phases 3 and 4 only): full-power fan against the averaged gyro rate.
+      float a = interval_testPoint / (DUMP_RATE_TAU_S * 1000.0f + interval_testPoint);
+      rate_f += a * (gyro_Z - rate_f);
       if (phase >= 3) {
-        float rate = gyro_Z;
-        float cmd = 0.0;
-        if (fabs(rate) > DUMP_DEADBAND_DPS) {
-          cmd = constrain(-rate / DUMP_FULL_RATE_DPS, -1.0f, 1.0f);
+        if (fan_state == 0) {
+          if (rate_f > DUMP_ON_DPS) fan_state = -1;        // spinning +Z: -Z fan slows it
+          else if (rate_f < -DUMP_ON_DPS) fan_state = 1;   // spinning -Z: +Z fan slows it
+        } else if (fan_state == -1 && rate_f < DUMP_OFF_DPS) {
+          fan_state = 0;
+        } else if (fan_state == 1 && rate_f > -DUMP_OFF_DPS) {
+          fan_state = 0;
         }
-        thrusters_set(cmd);
+        thrusters_set((float)fan_state);
       }
 
       lab8_log_row(t, rw_pwm, phase);

@@ -43,6 +43,11 @@
 #define HOLD_BIAS_CAL_MS        3000   // time KestrelSAT is held still to measure gyro bias (ms)
 #define HOLD_MIN_OFF_MS         500    // after a fan turns off, neither fan fires for this long (ms); lets it spin down
 
+// RW momentum dump (cmd 13): full-power fan against the averaged body rate.
+#define DUMP_RATE_TAU_S         0.5    // averaging time constant on gyro_Z (s); raw gyro is noisy (about +/-3 deg/s at rest)
+#define DUMP_ON_DPS             2.0    // fire the opposing fan when |averaged rate| exceeds this (deg/s)
+#define DUMP_OFF_DPS            0.5    // turn it off when the rate falls below this or reverses (deg/s)
+
 // Magnetic heading hold (cmd 16): same controller as cmd 15, heading from the magnetometer.
 #define MAG_OFFSET_X_UT         -50.52 // hard-iron offset of mag X (uT); avg of 2026-11-03 cmd 16 calibrations (-50.55, -50.47); recalibrate with cmd 16 C
 #define MAG_OFFSET_Y_UT         -27.41 // hard-iron offset of mag Y (uT); avg of -27.52 and -27.30 (a third run gave -42.45, treated as an incomplete turn)
