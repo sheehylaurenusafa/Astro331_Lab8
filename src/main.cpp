@@ -52,7 +52,7 @@
  * | 14  | Lab 8: Data log (time, gyro Z, mag X/Y, fan states, RW cmd/meas) with manual fan control ('1'/'2' toggle fans, '0' fans off, 'X' end) |
  * | 15  | Lab 8: Closed-loop heading hold on integrated gyro ('Z' re-zero target, 'X' end) |
  * | 16  | Lab 8: Closed-loop heading hold on magnetometer heading ('Z' re-zero target, 'X' end) |
- * | 17  | Lab 8: Closed-loop RW momentum dump (RW slows only as fast as the thrusters keep the body still) |
+ * | 17  | Lab 8: Closed-loop RW momentum dump (RW slows only while the thrusters hold the magnetic heading) |
  * | 98  | SD Card: List files (USB Serial only) |
  * | 99  | SD Card: Print file menu (USB Serial only) |
  * 
@@ -66,7 +66,7 @@
  * - **Lab 8 Log**: logs time, gyro Z and both fan on/off states until 'X'; fans toggled by key during the test
  * - **Lab 8 Hold**: measures gyro bias, then fires thrusters to hold the starting heading (integrated gyro) until 'X'
  * - **Lab 8 Mag Hold**: optional magnetometer calibration spin, then fires thrusters to hold the starting magnetic heading until 'X'
- * - **Lab 8 CL Dump**: RW spun to a chosen speed, release on blue LED, RW slowed only while the thrusters hold the body rate near 0
+ * - **Lab 8 CL Dump**: RW spun to a chosen speed, release on blue LED, RW slowed only while the thrusters hold the starting magnetic heading
  * 
  * @section datalog Data Logging Format
  * All test data is logged to SD card in CSV format with:
@@ -2092,34 +2092,50 @@ void lab8_mag_heading_hold() {
 // Lab 8: Closed-Loop Reaction Wheel Momentum Dump
 /*---------------------------------------------------------------------------------------------*/
 /**
- * @brief Slows the RW to zero only as fast as the thrusters can keep KestrelSAT's body rate near zero.
+ * @brief Slows the RW to zero while the thrusters hold KestrelSAT's starting magnetic heading.
  *
  * Profile (phase column):
- *  - 1: 0-10 s hold KestrelSAT by hand while the RW spins up to the chosen speed (LED white)
+ *  - 1: 0-10 s hold KestrelSAT by hand while the RW spins up to the chosen speed (LED white).
+ *       Over the last 3 s the gyro bias and mag X/Y are averaged; that magnetic heading is the target.
  *  - 2: 10-13 s release KestrelSAT when the LED turns blue; RW holds that speed
  *  - 3: closed-loop spin-down (LED pink) until the RW command reaches 0
- *  - 4: 15 s more of rate damping with the RW off
+ *  - 4: 15 s more of heading hold with the RW off
  *
- * Every 50 ms in phase 3:
- *  - The body rate is gyro Z averaged over DUMP_RATE_TAU_S.
- *  - Thrusters: the fan that opposes the spin runs at full power once |rate| > CLDUMP_FAN_ON_DPS and
- *    turns off when the rate falls below CLDUMP_FAN_OFF_DPS or reverses.
- *  - RW: the command steps down by up to CLDUMP_MAX_RAMP_PCT_S, scaled by how still the body is:
- *    full step while |rate| < CLDUMP_RATE_OK_DPS, shrinking to no step at CLDUMP_RATE_LIMIT_DPS.
- *    So the wheel waits whenever the fans fall behind, and the spin-down takes as long as the fans need.
- * Progress (RW %, body rate) is printed every 10 s. 'X' aborts with the RW and fans stopped.
+ * Every 50 ms in phases 3 and 4:
+ *  - Heading: filtered magnetic heading, same as cmd 16 (MAG_OFFSET_*, MAG_FILTER_TAU_S, MAG_HEADING_SIGN).
+ *  - Thrusters: the cmd 15/16 controller on the predicted stopping error, using the gyro rate averaged over
+ *    DUMP_RATE_TAU_S. A fan fires when the predicted error passes CLDUMP_FAN_ON_DEG and pushes back to center.
+ *  - RW: the command steps down by up to CLDUMP_MAX_RAMP_PCT_S, scaled by the smaller of a heading gate
+ *    (full step inside CLDUMP_HEADING_OK_DEG, none at CLDUMP_HEADING_LIMIT_DEG) and a rate gate
+ *    (full step below CLDUMP_RATE_OK_DPS, none at CLDUMP_RATE_LIMIT_DPS). So the wheel only gives up
+ *    momentum while KestrelSAT is on heading and nearly still, and waits whenever the fans fall behind.
+ * Progress (RW %, heading error, body rate) is printed every 10 s. 'X' aborts with the RW and fans stopped.
+ * Logs the standard Lab 8 columns plus the magnetic heading and target.
  */
 void lab8_closed_loop_dump() {
   int start_pct = lab8_prompt_int("Enter starting RW speed in percent (10 to 100):");
   start_pct = constrain(start_pct, 10, 100);
   const float rw_start = start_pct / 100.0f;
   const uint32_t SPINUP_MS = 10000;
+  const uint32_t CAL_START_MS = 7000;   // average bias and heading over 7-10 s, while still held
   const uint32_t RELEASE_MS = 3000;
   const uint32_t DAMP_MS = 15000;
   const uint32_t RAMP_START = SPINUP_MS + RELEASE_MS;
 
-  if (!lab8_open_file("Lab8_cldump")) return;
-  lab8_println("[INFO] Hold KestrelSAT still, then send any key to begin. Release when LED turns BLUE (send 'X' to abort)...");
+  if (!sd_createDataFile(&dataFile, "Lab8_cldump")) {
+    lab8_println("[ERROR] Failed to create data file. Aborting test.");
+    return;
+  }
+  dataFile.print(LAB8_HEADER);
+  dataFile.println(",mag_heading(deg),target(deg)");
+  dataFile.flush();
+  char file_name[40];
+  dataFile.getName(file_name, sizeof(file_name));
+  Xbee.print("[INFO] Data file created successfully: ");
+  Xbee.println(file_name);
+  Serial.print("[INFO] Data file created successfully: ");
+  Serial.println(file_name);
+  lab8_println("[INFO] Point KestrelSAT at the heading to hold, hold it still, then send any key. Release when LED turns BLUE (send 'X' to abort)...");
   lab8_wait_for_key();
 
   neopixelWrite(RGB_BUILTIN, 255, 255, 255); // Set to white (R=255, G=255, B=255)
@@ -2130,9 +2146,15 @@ void lab8_closed_loop_dump() {
   uint32_t t_ramp_done = 0;   // time the RW command reached 0 (ms since t0)
   uint32_t t_next_report = 0;
   float rw_pwm = rw_start;
-  float rate_f = 0.0;         // averaged body rate (deg/s)
-  int fan_state = 0;          // +1 = +Z fan on, -1 = -Z fan on, 0 = off
+  float bias_sum = 0.0, mx_sum = 0.0, my_sum = 0.0;
+  uint32_t n_cal = 0;
+  float bias = 0.0;
+  float mx_f = 0.0, my_f = 0.0;   // filtered mag X/Y (uT)
+  float heading = 0.0, target = 0.0;
+  float rate_f = 0.0;             // averaged body rate, bias removed (deg/s)
+  int fan_state = 0;              // +1 = +Z fan on, -1 = -Z fan on, 0 = off
   int phase = 1;
+  char msg[128];
   while (true) {
     if (lab8_abort_requested()) {
       lab8_end_test("[CAUTION] Test Canceled Early. File closed.");
@@ -2146,8 +2168,14 @@ void lab8_closed_loop_dump() {
       phase = 2;
       if (!released) {
         released = true;
+        bias = (n_cal > 0) ? bias_sum / n_cal : 0.0;
+        mx_f = (n_cal > 0) ? mx_sum / n_cal : mag_X;
+        my_f = (n_cal > 0) ? my_sum / n_cal : mag_Y;
+        target = lab8_mag_heading(mx_f, my_f, MAG_OFFSET_X_UT, MAG_OFFSET_Y_UT);
+        heading = target;
         neopixelWrite(RGB_BUILTIN, 0, 0, 255); // Set to blue (R=0, G=0, B=255): release KestrelSAT
-        lab8_println("[INFO] Release KestrelSAT now.");
+        snprintf(msg, sizeof(msg), "[INFO] Gyro bias = %.3f deg/s, target heading = %.1f deg. Release KestrelSAT now.", bias, target);
+        lab8_println(msg);
       }
     } else if (rw_pwm > 0.0f) {
       phase = 3;
@@ -2161,7 +2189,7 @@ void lab8_closed_loop_dump() {
       phase = 4;
       if (t_ramp_done == 0) {
         t_ramp_done = t;
-        lab8_println("[INFO] RW command at 0. Damping body rate for 15 s.");
+        lab8_println("[INFO] RW command at 0. Holding heading for 15 s.");
       }
       if (t - t_ramp_done >= DAMP_MS) {
         lab8_end_test("[INFO] Closed-Loop Momentum Dump Complete. File closed.");
@@ -2173,36 +2201,57 @@ void lab8_closed_loop_dump() {
     if (millis() > timeNext_testPoint) {
       timeNext_testPoint += interval_testPoint;
       float dt = interval_testPoint / 1000.0f;
-      rate_f += dt / (DUMP_RATE_TAU_S + dt) * (gyro_Z - rate_f);
+      lab8_read_imu();
+
+      if (phase == 1 && t >= CAL_START_MS) {
+        bias_sum += gyro_Z;
+        mx_sum += mag_X;
+        my_sum += mag_Y;
+        n_cal++;
+      }
+      rate_f += dt / (DUMP_RATE_TAU_S + dt) * ((gyro_Z - bias) - rate_f);
+
+      float error = 0.0;
+      if (phase >= 2) {
+        float a = dt / (MAG_FILTER_TAU_S + dt);
+        mx_f += a * (mag_X - mx_f);
+        my_f += a * (mag_Y - my_f);
+        heading = lab8_mag_heading(mx_f, my_f, MAG_OFFSET_X_UT, MAG_OFFSET_Y_UT);
+        error = lab8_wrap180(target - heading);
+      }
 
       if (phase >= 3) {
-        // Thrusters: full-power fan against the averaged body rate.
-        if (fan_state == 0) {
-          if (rate_f > CLDUMP_FAN_ON_DPS) fan_state = -1;        // spinning +Z: -Z fan slows it
-          else if (rate_f < -CLDUMP_FAN_ON_DPS) fan_state = 1;   // spinning -Z: +Z fan slows it
-        } else if (fan_state == -1 && rate_f < CLDUMP_FAN_OFF_DPS) {
-          fan_state = 0;
-        } else if (fan_state == 1 && rate_f > -CLDUMP_FAN_OFF_DPS) {
-          fan_state = 0;
-        }
+        // Thrusters: hold the target heading (cmd 16 controller on the averaged rate).
+        float u;
+        fan_state = lab8_hold_fan_state(MAG_HEADING_SIGN * error, rate_f, fan_state, CLDUMP_FAN_ON_DEG, MAG_HOLD_CENTER_DEG, &u);
         thrusters_set((float)fan_state);
       }
 
       if (phase == 3) {
-        // RW: step down only as far as the body stays still.
-        float scale = (CLDUMP_RATE_LIMIT_DPS - fabs(rate_f)) / (CLDUMP_RATE_LIMIT_DPS - CLDUMP_RATE_OK_DPS);
-        scale = constrain(scale, 0.0f, 1.0f);
+        // RW: step down only while KestrelSAT is on heading and nearly still.
+        float s_head = (CLDUMP_HEADING_LIMIT_DEG - fabs(error)) / (CLDUMP_HEADING_LIMIT_DEG - CLDUMP_HEADING_OK_DEG);
+        float s_rate = (CLDUMP_RATE_LIMIT_DPS - fabs(rate_f)) / (CLDUMP_RATE_LIMIT_DPS - CLDUMP_RATE_OK_DPS);
+        float scale = constrain(fminf(s_head, s_rate), 0.0f, 1.0f);
         rw_pwm -= CLDUMP_MAX_RAMP_PCT_S / 100.0f * dt * scale;
         if (rw_pwm < 0.0f) rw_pwm = 0.0f;
         if (t >= t_next_report) {
           t_next_report += 10000;
-          char msg[96];
-          snprintf(msg, sizeof(msg), "[INFO] t = %lu s, RW at %.1f%%, body rate %.2f deg/s", (unsigned long)(t / 1000), rw_pwm * 100.0f, rate_f);
+          snprintf(msg, sizeof(msg), "[INFO] t = %lu s, RW at %.1f%%, heading error %.1f deg, body rate %.2f deg/s",
+                   (unsigned long)(t / 1000), rw_pwm * 100.0f, error, rate_f);
           lab8_println(msg);
         }
       }
 
-      lab8_log_row(t, rw_pwm, phase);
+      // Log the standard Lab 8 row plus heading and target:
+      float w_RW_cmd = -rw_pwm * 1000.0 * MOTOR_VOLTAGE / 12.0; // same scaling as Lab 7
+      float w_RW_meas = lab8_measure_RW_rpm();
+      char row[192];
+      snprintf(row, sizeof(row), "%lu,%.3f,%.3f,%.3f,%.1f,%.1f,%.3f,%.3f,%d,%.2f,%.2f",
+               (unsigned long)t, gyro_Z, mag_X, mag_Y, w_RW_cmd, w_RW_meas,
+               thrusters_get_plusZ(), thrusters_get_minusZ(), phase, heading, target);
+      dataFile.println(row);
+      dataFile.flush();
+      Serial.println(row);
     }
   }
 }
