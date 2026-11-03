@@ -2105,10 +2105,13 @@ void lab8_mag_heading_hold() {
  *  - Heading: filtered magnetic heading, same as cmd 16 (MAG_OFFSET_*, MAG_FILTER_TAU_S, MAG_HEADING_SIGN).
  *  - Thrusters: the cmd 15/16 controller on the predicted stopping error, using the gyro rate averaged over
  *    DUMP_RATE_TAU_S. A fan fires when the predicted error passes CLDUMP_FAN_ON_DEG and pushes back to center.
- *  - RW: the command steps down by up to CLDUMP_MAX_RAMP_PCT_S, scaled by the smaller of a heading gate
- *    (full step inside CLDUMP_HEADING_OK_DEG, none at CLDUMP_HEADING_LIMIT_DEG) and a rate gate
- *    (full step below CLDUMP_RATE_OK_DPS, none at CLDUMP_RATE_LIMIT_DPS). So the wheel only gives up
- *    momentum while KestrelSAT is on heading and nearly still, and waits whenever the fans fall behind.
+ *  - RW: the command steps down by up to CLDUMP_MAX_RAMP_PCT_S, scaled by the smallest of three gates:
+ *    heading (full step inside CLDUMP_HEADING_OK_DEG, none at CLDUMP_HEADING_LIMIT_DEG), body rate
+ *    (full below CLDUMP_RATE_OK_DPS, none at CLDUMP_RATE_LIMIT_DPS) and measured wheel slow-down from
+ *    the encoder (full below CLDUMP_DECEL_OK_RPMS, none at CLDUMP_DECEL_LIMIT_RPMS). The last gate is
+ *    needed because wheel speed is far from linear in PWM: most of the speed is lost in the last few
+ *    percent of command. So the wheel only gives up momentum while KestrelSAT is on heading and nearly
+ *    still, and waits whenever the fans fall behind.
  * Progress (RW %, heading error, body rate) is printed every 10 s. 'X' aborts with the RW and fans stopped.
  * Logs the standard Lab 8 columns plus the magnetic heading and target.
  */
@@ -2152,6 +2155,10 @@ void lab8_closed_loop_dump() {
   float mx_f = 0.0, my_f = 0.0;   // filtered mag X/Y (uT)
   float heading = 0.0, target = 0.0;
   float rate_f = 0.0;             // averaged body rate, bias removed (deg/s)
+  float rpm_f = 0.0;              // averaged measured wheel speed magnitude (RPM)
+  float rpm_1s_ago = 0.0;         // rpm_f one second earlier (RPM)
+  float decel = 0.0;              // measured wheel slow-down over the last second (RPM/s)
+  uint32_t t_next_decel = 0;
   int fan_state = 0;              // +1 = +Z fan on, -1 = -Z fan on, 0 = off
   int phase = 1;
   char msg[128];
@@ -2210,6 +2217,13 @@ void lab8_closed_loop_dump() {
         n_cal++;
       }
       rate_f += dt / (DUMP_RATE_TAU_S + dt) * ((gyro_Z - bias) - rate_f);
+      float w_RW_meas = lab8_measure_RW_rpm();
+      rpm_f += dt / (DUMP_RATE_TAU_S + dt) * (fabs(w_RW_meas) - rpm_f);
+      if (t >= t_next_decel) {
+        t_next_decel = t + 1000;
+        decel = rpm_1s_ago - rpm_f;
+        rpm_1s_ago = rpm_f;
+      }
 
       float error = 0.0;
       if (phase >= 2) {
@@ -2231,20 +2245,20 @@ void lab8_closed_loop_dump() {
         // RW: step down only while KestrelSAT is on heading and nearly still.
         float s_head = (CLDUMP_HEADING_LIMIT_DEG - fabs(error)) / (CLDUMP_HEADING_LIMIT_DEG - CLDUMP_HEADING_OK_DEG);
         float s_rate = (CLDUMP_RATE_LIMIT_DPS - fabs(rate_f)) / (CLDUMP_RATE_LIMIT_DPS - CLDUMP_RATE_OK_DPS);
-        float scale = constrain(fminf(s_head, s_rate), 0.0f, 1.0f);
+        float s_decel = (CLDUMP_DECEL_LIMIT_RPMS - decel) / (CLDUMP_DECEL_LIMIT_RPMS - CLDUMP_DECEL_OK_RPMS);
+        float scale = constrain(fminf(fminf(s_head, s_rate), s_decel), 0.0f, 1.0f);
         rw_pwm -= CLDUMP_MAX_RAMP_PCT_S / 100.0f * dt * scale;
         if (rw_pwm < 0.0f) rw_pwm = 0.0f;
         if (t >= t_next_report) {
           t_next_report += 10000;
-          snprintf(msg, sizeof(msg), "[INFO] t = %lu s, RW at %.1f%%, heading error %.1f deg, body rate %.2f deg/s",
-                   (unsigned long)(t / 1000), rw_pwm * 100.0f, error, rate_f);
+          snprintf(msg, sizeof(msg), "[INFO] t = %lu s, RW cmd %.1f%%, %.0f RPM, heading error %.1f deg, body rate %.2f deg/s",
+                   (unsigned long)(t / 1000), rw_pwm * 100.0f, rpm_f, error, rate_f);
           lab8_println(msg);
         }
       }
 
       // Log the standard Lab 8 row plus heading and target:
       float w_RW_cmd = -rw_pwm * 1000.0 * MOTOR_VOLTAGE / 12.0; // same scaling as Lab 7
-      float w_RW_meas = lab8_measure_RW_rpm();
       char row[192];
       snprintf(row, sizeof(row), "%lu,%.3f,%.3f,%.3f,%.1f,%.1f,%.3f,%.3f,%d,%.2f,%.2f",
                (unsigned long)t, gyro_Z, mag_X, mag_Y, w_RW_cmd, w_RW_meas,

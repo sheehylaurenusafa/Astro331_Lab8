@@ -55,6 +55,8 @@
 #define CLDUMP_RATE_OK_DPS      0.3    // full-speed spin-down while |averaged body rate| is below this (deg/s)
 #define CLDUMP_RATE_LIMIT_DPS   1.0    // spin-down pauses when |averaged body rate| reaches this (deg/s)
 #define CLDUMP_FAN_ON_DEG       2.0    // fire a fan when the predicted heading error passes this (deg); pushes back to MAG_HOLD_CENTER_DEG
+#define CLDUMP_DECEL_OK_RPMS    2.0    // full-speed spin-down while the measured wheel slows less than this (RPM/s)
+#define CLDUMP_DECEL_LIMIT_RPMS 5.0    // spin-down pauses when the measured wheel slows this fast (RPM/s); 2026-11-03 dump log: fans kept up at ~5-7 RPM/s
 
 // Magnetic heading hold (cmd 16): same controller as cmd 15, heading from the magnetometer.
 #define MAG_OFFSET_X_UT         -50.52 // hard-iron offset of mag X (uT); avg of 2026-11-03 cmd 16 calibrations (-50.55, -50.47); recalibrate with cmd 16 C
