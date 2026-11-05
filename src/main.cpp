@@ -2390,7 +2390,10 @@ void lab8_wheel_hold_dump() {
 
     lab8_read_imu();
     float w_RW_meas = lab8_measure_RW_rpm();
-    rpm_f += dt / (WHL_FILTER_TAU_S + dt) * (w_RW_meas - rpm_f);
+    // The RW is only ever driven one way (PWM >= 0), so use the speed magnitude. That keeps the dump
+    // running even if the encoder counts backwards (e.g. its A/B wires swapped when the wheel was changed).
+    float w_RW_abs = fabsf(w_RW_meas);
+    rpm_f += dt / (WHL_FILTER_TAU_S + dt) * (w_RW_abs - rpm_f);
     rate_f += dt / (WHL_FILTER_TAU_S + dt) * ((gyro_Z - bias) - rate_f);
 
     // Phase changes:
@@ -2398,7 +2401,7 @@ void lab8_wheel_hold_dump() {
       bias_sum += gyro_Z;
       mx_sum += mag_X;
       my_sum += mag_Y;
-      rpm_sum += w_RW_meas;
+      rpm_sum += w_RW_abs;
       n_cal++;
     }
     if (phase == 1 && t >= SPINUP_MS) {
@@ -2406,7 +2409,7 @@ void lab8_wheel_hold_dump() {
       bias = (n_cal > 0) ? bias_sum / n_cal : 0.0;
       mx_f = (n_cal > 0) ? mx_sum / n_cal : mag_X;
       my_f = (n_cal > 0) ? my_sum / n_cal : mag_Y;
-      rpm_f = (n_cal > 0) ? rpm_sum / n_cal : w_RW_meas;
+      rpm_f = (n_cal > 0) ? rpm_sum / n_cal : w_RW_abs;
       rate_f = 0.0;
       target = lab8_mag_heading(mx_f, my_f, MAG_OFFSET_X_UT, MAG_OFFSET_Y_UT);
       heading = target;
@@ -2414,6 +2417,11 @@ void lab8_wheel_hold_dump() {
       snprintf(msg, sizeof(msg), "[INFO] Gyro bias = %.3f deg/s, target heading = %.1f deg, RW = %.0f RPM. Release KestrelSAT now.",
                bias, target, rpm_f);
       lab8_println(msg);
+      if (rpm_f < WHL_DONE_RPM) {
+        snprintf(msg, sizeof(msg), "[WARN] Encoder reads only %.0f RPM (dump stops below %.0f RPM). Check the RW encoder wires and RW power.",
+                 rpm_f, WHL_DONE_RPM);
+        lab8_println(msg);
+      }
     } else if (phase == 2 && t >= DUMP_START) {
       phase = 3;
       w_target = rpm_f;
