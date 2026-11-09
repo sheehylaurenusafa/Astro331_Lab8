@@ -1,0 +1,34 @@
+digraph G {
+  graph [fontname="Inter" fontsize=22 bgcolor="white" pad=0.3 nodesep=0.35 ranksep=0.45 rankdir=TB nodesep=0.45];
+  node  [fontname="Inter" fontsize=20 margin="0.18,0.08"];
+  edge  [fontname="Inter" color="#404040" penwidth=2 arrowsize=0.9];
+  IN [shape=box style="filled,rounded" fillcolor="#FCE6D8" color="#E97132" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_hold_fan_state(error, rate, fan_state, on_deg, off_deg)</B></FONT>> ];
+  U [shape=box style="filled,rounded" fillcolor="#FCE6D8" color="#E97132" fontcolor="#0E2841" penwidth=2 label=<<B>Predicted stopping error: where will KestrelSAT stop if we brake now?</B><BR/><FONT POINT-SIZE="17">u = error − rate·|rate| / (2α) − rate·t_lag</FONT><BR/><FONT POINT-SIZE="17">α = HOLD_ALPHA_DPS2 = 1.0 °/s²     t_lag = HOLD_FAN_LAG_S = 0.5 s</FONT>> ];
+  S [shape=diamond style="filled" fillcolor="#FFF4CC" color="#BF9000" fontcolor="#0E2841" penwidth=2 label=<<FONT POINT-SIZE="17">fan_state</FONT>> margin="0.02,0.02"];
+  P [shape=diamond style="filled" fillcolor="#FFF4CC" color="#BF9000" fontcolor="#0E2841" penwidth=2 label=<<FONT POINT-SIZE="17">u &lt; off_deg ?</FONT>> margin="0.02,0.02"];
+  M [shape=diamond style="filled" fillcolor="#FFF4CC" color="#BF9000" fontcolor="#0E2841" penwidth=2 label=<<FONT POINT-SIZE="17">u &gt; −off_deg ?</FONT>> margin="0.02,0.02"];
+  O [shape=diamond style="filled" fillcolor="#FFF4CC" color="#BF9000" fontcolor="#0E2841" penwidth=2 label=<<FONT POINT-SIZE="17">off ≥ 500 ms?</FONT><BR/><FONT POINT-SIZE="17">(HOLD_MIN_OFF_MS)</FONT>> margin="0.02,0.02"];
+  OFF [shape=box style="filled,rounded" fillcolor="#EEEEEE" color="#7F7F7F" fontcolor="#0E2841" penwidth=2 label=<<B>fan_state = 0</B><BR/><FONT POINT-SIZE="17">record t_off (spin-down timer)</FONT>> ];
+  KEEP [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<B>keep pushing</B><BR/><FONT POINT-SIZE="17">same fan stays on</FONT>> ];
+  ON [shape=diamond style="filled" fillcolor="#FFF4CC" color="#BF9000" fontcolor="#0E2841" penwidth=2 label=<<FONT POINT-SIZE="17">compare u</FONT><BR/><FONT POINT-SIZE="17">with on_deg</FONT>> margin="0.02,0.02"];
+  FP [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<B>fan_state = +1</B><BR/><FONT POINT-SIZE="17">+Z fan on</FONT>> ];
+  FM [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<B>fan_state = −1</B><BR/><FONT POINT-SIZE="17">−Z fan on</FONT>> ];
+  ST [shape=box style="filled,rounded" fillcolor="#EEEEEE" color="#7F7F7F" fontcolor="#0E2841" penwidth=2 label=<<B>fan_state = 0</B><BR/><FONT POINT-SIZE="17">both fans off</FONT>> ];
+  IN -> U [ ];
+  U -> S [ ];
+  S -> P [ label=<<FONT POINT-SIZE="17"><B>+1</B></FONT>> ];
+  S -> O [ label=<<FONT POINT-SIZE="17"><B>0</B></FONT>> ];
+  S -> M [ label=<<FONT POINT-SIZE="17"><B>−1</B></FONT>> ];
+  P -> OFF [ label=<<FONT POINT-SIZE="17"><B>yes</B></FONT>> ];
+  P -> KEEP [ label=<<FONT POINT-SIZE="17"><B>no</B></FONT>> ];
+  M -> OFF [ label=<<FONT POINT-SIZE="17"><B>yes</B></FONT>> ];
+  M -> KEEP [ label=<<FONT POINT-SIZE="17"><B>no</B></FONT>> ];
+  O -> ST [ label=<<FONT POINT-SIZE="17"><B>no</B></FONT>> ];
+  O -> ON [ label=<<FONT POINT-SIZE="17"><B>yes</B></FONT>> ];
+  ON -> FP [ label=<<FONT POINT-SIZE="17"><B>u &gt; on_deg</B></FONT>> ];
+  ON -> ST [ label=<<FONT POINT-SIZE="17"><B>inside band</B></FONT>> ];
+  ON -> FM [ label=<<FONT POINT-SIZE="17"><B>u &lt; −on_deg</B></FONT>> ];
+  NOTE [shape=box style="filled,rounded" fillcolor="#FFFFFF" color="#9FB3C8" fontcolor="#404040" penwidth=2 label=<<B>Thresholds used</B><BR/><FONT POINT-SIZE="17">cmd 16:   on_deg = 5°  (±5° band),  off_deg = 0.5°</FONT><BR/><FONT POINT-SIZE="17">cmd 18 phase 4:   on_deg = 2°,  off_deg = 0.5°</FONT><BR/><FONT POINT-SIZE="17">Fans never switch directly from one to the other.</FONT>> ];
+  {rank=same; OFF; KEEP; ON}
+  KEEP -> NOTE [style=invis]; 
+}

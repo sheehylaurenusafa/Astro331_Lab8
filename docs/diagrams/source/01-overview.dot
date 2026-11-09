@@ -1,0 +1,40 @@
+digraph G {
+  graph [fontname="Inter" fontsize=22 bgcolor="white" pad=0.3 nodesep=0.35 ranksep=0.45 rankdir=TB newrank=true compound=true nodesep=0.5];
+  node  [fontname="Inter" fontsize=20 margin="0.18,0.08"];
+  edge  [fontname="Inter" color="#404040" penwidth=2 arrowsize=0.9];
+  PMM [shape=box style="filled,rounded" fillcolor="#0E2841" color="#0E2841" fontcolor="#FFFFFF" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>process_main_menu()</B></FONT><BR/><FONT POINT-SIZE="17">loop() checks USB and XBee</FONT>> ];
+  GET [shape=box style="filled,rounded" fillcolor="#0E2841" color="#0E2841" fontcolor="#FFFFFF" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>get_command_from_ground_station()</B></FONT><BR/><FONT POINT-SIZE="17">readStringUntil('\n') → toInt()</FONT>> ];
+  SW [shape=diamond style="filled" fillcolor="#0E2841" color="#0E2841" fontcolor="#FFFFFF" penwidth=2 label=<<FONT POINT-SIZE="17">switch</FONT><BR/><FONT POINT-SIZE="17">(command)</FONT>> margin="0.02,0.02"];
+  PMM -> GET [ ];
+  GET -> SW [ ];
+  C16 [shape=box style="filled,rounded" fillcolor="#156082" color="#0E2841" fontcolor="#FFFFFF" penwidth=2 label=<<B>cmd 16</B><BR/><FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_mag_heading_hold()</B></FONT><BR/><FONT POINT-SIZE="17">thrusters hold the heading inside ±5°</FONT>> ];
+  C18 [shape=box style="filled,rounded" fillcolor="#156082" color="#0E2841" fontcolor="#FFFFFF" penwidth=2 label=<<B>cmd 18</B><BR/><FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_wheel_hold_dump()</B></FONT><BR/><FONT POINT-SIZE="17">RW holds heading while a fan drains it</FONT>> ];
+  SW -> C16 [ label=<<FONT POINT-SIZE="17"><B>16</B></FONT>> ];
+  SW -> C18 [ label=<<FONT POINT-SIZE="17"><B>18</B></FONT>> ];
+  subgraph cluster_sense { label=<<B>1 · Sense</B>> labeljust=l style="rounded,filled" fillcolor="#F7F9FB" color="#9FB3C8" penwidth=1.5 fontcolor="#0E2841" fontsize=22 
+  IMU [shape=box style="filled,rounded" fillcolor="#DCEFF8" color="#0F9ED5" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_read_imu()</B></FONT><BR/><FONT POINT-SIZE="17">ICM-20948 getAGMT(): gyro_Z, mag_X, mag_Y</FONT>> ];
+  HDG [shape=box style="filled,rounded" fillcolor="#DCEFF8" color="#0F9ED5" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_mag_heading()</B></FONT><BR/><FONT POINT-SIZE="17">atan2(mag_X − off_X, mag_Y − off_Y)</FONT>> ];
+  ENC [shape=box style="filled,rounded" fillcolor="#DCEFF8" color="#0F9ED5" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_measure_RW_rpm()</B></FONT><BR/><FONT POINT-SIZE="17">encoder counts → RPM  (cmd 18 only)</FONT>> ];
+  }
+  subgraph cluster_ctrl { label=<<B>2 · Decide</B>> labeljust=l style="rounded,filled" fillcolor="#F7F9FB" color="#9FB3C8" penwidth=1.5 fontcolor="#0E2841" fontsize=22 
+  WRAP [shape=box style="filled,rounded" fillcolor="#FCE6D8" color="#E97132" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_wrap180()</B></FONT><BR/><FONT POINT-SIZE="17">error = target − heading</FONT>> ];
+  BB [shape=box style="filled,rounded" fillcolor="#FCE6D8" color="#E97132" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_hold_fan_state()</B></FONT><BR/><FONT POINT-SIZE="17">bang-bang fan choice on predicted stop error</FONT>> ];
+  TBL [shape=box style="filled,rounded" fillcolor="#FCE6D8" color="#E97132" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_rw_pwm_from_rpm()</B></FONT><BR/><FONT POINT-SIZE="17">RW speed-curve lookup  (cmd 18 only)</FONT>> ];
+  }
+  subgraph cluster_act { label=<<B>3 · Actuate</B>> labeljust=l style="rounded,filled" fillcolor="#F7F9FB" color="#9FB3C8" penwidth=1.5 fontcolor="#0E2841" fontsize=22 
+  THR [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>thrusters_set(+1 / 0 / −1)</B></FONT><BR/><FONT POINT-SIZE="17">thrusters.cpp → GPIO 27 (+Z), 13 (−Z)</FONT>> ];
+  RW [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>driver.setOutput(rw_pwm)</B></FONT><BR/><FONT POINT-SIZE="17">TB9051FTG → reaction wheel  (cmd 18 only)</FONT>> ];
+  }
+  subgraph cluster_log { label=<<B>4 · Log, then repeat</B>> labeljust=l style="rounded,filled" fillcolor="#F7F9FB" color="#9FB3C8" penwidth=1.5 fontcolor="#0E2841" fontsize=22 
+  SD [shape=box style="filled,rounded" fillcolor="#EEEEEE" color="#7F7F7F" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>dataFile.println()</B></FONT><BR/><FONT POINT-SIZE="17">CSV row to SD every 50 ms</FONT><BR/><FONT POINT-SIZE="17">+ USB / XBee telemetry</FONT>> ];
+  STOP [shape=box style="filled,rounded" fillcolor="#F6D5D5" color="#C00000" fontcolor="#0E2841" penwidth=2 label=<<B>'X' key ends the test</B><BR/><FONT POINT-SIZE="17">thrusters_off(), RW to 0, dataFile.close()</FONT>> ];
+  }
+  IMU -> HDG -> ENC [style=invis]; WRAP -> BB -> TBL [style=invis]; THR -> RW [style=invis]; SD -> STOP [style=invis];
+  ENC -> SD [style=invis]; TBL -> THR [style=invis];
+  {rank=same; C16; C18} {rank=same; IMU; WRAP} {rank=same; HDG; BB} {rank=same; ENC; TBL} {rank=same; SD; THR} {rank=same; STOP; RW}
+  C16 -> IMU [ lhead=cluster_sense];
+  C18 -> IMU [ lhead=cluster_sense];
+  HDG -> BB [ ltail=cluster_sense lhead=cluster_ctrl];
+  TBL -> THR [ ltail=cluster_ctrl lhead=cluster_act];
+  THR -> SD [ ltail=cluster_act lhead=cluster_log];
+}

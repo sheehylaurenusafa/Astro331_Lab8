@@ -1,0 +1,27 @@
+digraph G {
+  graph [fontname="Inter" fontsize=22 bgcolor="white" pad=0.3 nodesep=0.35 ranksep=0.45 rankdir=TB newrank=true nodesep=0.5];
+  node  [fontname="Inter" fontsize=20 margin="0.18,0.08"];
+  edge  [fontname="Inter" color="#404040" penwidth=2 arrowsize=0.9];
+  A [shape=box style="filled,rounded" fillcolor="#156082" color="#0E2841" fontcolor="#FFFFFF" penwidth=2 label=<<B>cmd 18</B><BR/><FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_wheel_hold_dump()</B></FONT><BR/><FONT POINT-SIZE="17">lab8_prompt_int(): starting RW speed 1–100 %</FONT><BR/><FONT POINT-SIZE="17">sd_createDataFile("Lab8_whldump"), wait for a key</FONT>> ];
+  P1 [shape=box style="filled,rounded" fillcolor="#DCEFF8" color="#0F9ED5" fontcolor="#0E2841" penwidth=2 label=<<B>Phase 1  ·  0–10 s  ·  LED white</B><BR/><FONT POINT-SIZE="17">driver.setOutput(rw_start): RW spins up, KestrelSAT held by hand</FONT><BR/><FONT POINT-SIZE="17">7–10 s: average gyro_Z, mag X/Y and |RW RPM|</FONT>> ];
+  P2 [shape=box style="filled,rounded" fillcolor="#DCEFF8" color="#0F9ED5" fontcolor="#0E2841" penwidth=2 label=<<B>Phase 2  ·  10–13 s  ·  LED blue: release</B><BR/><FONT POINT-SIZE="17">bias, target = lab8_mag_heading(averages), rpm_f</FONT><BR/><FONT POINT-SIZE="17">[WARN] if encoder reads &lt; 60 RPM</FONT>> ];
+  P3 [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<B>Phase 3  ·  wheel-held dump  ·  LED teal</B><BR/><FONT POINT-SIZE="17">thrusters_set(+1): +Z fan on full the whole phase</FONT><BR/><FONT POINT-SIZE="17">RW speed loop holds the heading, so the wheel must slow</FONT><BR/><FONT POINT-SIZE="17">(see the phase 3 control diagram)</FONT>> ];
+  D [shape=diamond style="filled" fillcolor="#FFF4CC" color="#BF9000" fontcolor="#0E2841" penwidth=2 label=<<FONT POINT-SIZE="17">rpm_f &lt; 60 RPM</FONT><BR/><FONT POINT-SIZE="17">or 300 s?</FONT>> margin="0.02,0.02"];
+  P4 [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<B>Phase 4  ·  thrusters hold heading</B><BR/><FONT POINT-SIZE="17">rw_pwm = 0 (RW off)</FONT><BR/><FONT POINT-SIZE="17">lab8_hold_fan_state(err, rate, 2°, 0.5°) → thrusters_set()</FONT><BR/><FONT POINT-SIZE="17">fans hold the heading until X</FONT>> ];
+  X [shape=box style="filled,rounded" fillcolor="#F6D5D5" color="#C00000" fontcolor="#0E2841" penwidth=2 label=<<B>'X' key</B><BR/><FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_end_test()</B></FONT><BR/><FONT POINT-SIZE="17">thrusters_off(), driver.setOutput(0)</FONT><BR/><FONT POINT-SIZE="17">dataFile.close(), LED green</FONT>> ];
+  subgraph cluster_tick { label=<<B>Every 50 ms, all phases</B>> labeljust=l style="rounded,filled" fillcolor="#F7F9FB" color="#9FB3C8" penwidth=1.5 fontcolor="#0E2841" fontsize=22 
+  T1 [shape=box style="filled,rounded" fillcolor="#DCEFF8" color="#0F9ED5" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_read_imu()</B></FONT><BR/><FONT POINT-SIZE="17">gyro_Z, mag_X, mag_Y</FONT>> ];
+  T2 [shape=box style="filled,rounded" fillcolor="#DCEFF8" color="#0F9ED5" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_measure_RW_rpm()</B></FONT><BR/><FONT POINT-SIZE="17">|RPM|, filtered τ = 0.2 s</FONT>> ];
+  T3 [shape=box style="filled,rounded" fillcolor="#EEEEEE" color="#7F7F7F" fontcolor="#0E2841" penwidth=2 label=<<B>Log CSV row</B><BR/><FONT POINT-SIZE="17">standard Lab 8 columns +</FONT><BR/><FONT POINT-SIZE="17">heading, target, w_RW_target</FONT>> ];
+  T4 [shape=box style="filled,rounded" fillcolor="#F6D5D5" color="#C00000" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_abort_requested()</B></FONT><BR/><FONT POINT-SIZE="17">'X' → end (abort if before phase 4)</FONT>> ];
+  }
+  T1 -> T2 -> T3 -> T4 [style=invis];
+  A -> P1 [ ];
+  P1 -> P2 [ ];
+  P2 -> P3 [ ];
+  P3 -> D [ ];
+  D -> P3 [ label=<<FONT POINT-SIZE="17"><B>no</B></FONT>> constraint=false];
+  D -> P4 [ label=<<FONT POINT-SIZE="17"><B>yes</B></FONT>> ];
+  P4 -> X [ label=<<FONT POINT-SIZE="17"><B>'X'</B></FONT>> ];
+  {rank=same; P1; T1} 
+}

@@ -1,0 +1,22 @@
+digraph G {
+  graph [fontname="Inter" fontsize=22 bgcolor="white" pad=0.3 nodesep=0.35 ranksep=0.45 rankdir=TB nodesep=0.5 ranksep=0.55 newrank=true];
+  node  [fontname="Inter" fontsize=20 margin="0.18,0.08"];
+  edge  [fontname="Inter" color="#404040" penwidth=2 arrowsize=0.9];
+  SET [shape=box style="filled,rounded" fillcolor="#156082" color="#0E2841" fontcolor="#FFFFFF" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>thrusters_set(cmd)</B></FONT><BR/><FONT POINT-SIZE="17">cmd from −1 to +1</FONT><BR/><FONT POINT-SIZE="17">cmd ≥ 0 → thrusters_set_each(cmd, 0)</FONT><BR/><FONT POINT-SIZE="17">cmd &lt; 0 → thrusters_set_each(0, −cmd)</FONT>> ];
+  EACH [shape=box style="filled,rounded" fillcolor="#FCE6D8" color="#E97132" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>thrusters_set_each(plusZ, minusZ)</B></FONT><BR/><FONT POINT-SIZE="17">clamp 0–1, save plusZ_cmd / minusZ_cmd</FONT><BR/><FONT POINT-SIZE="17">(thrusters_get_*() reads them for the logs)</FONT>> ];
+  WF [shape=box style="filled,rounded" fillcolor="#FCE6D8" color="#E97132" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>write_fan(pin, ch, duty)</B></FONT><BR/><FONT POINT-SIZE="17">duty &lt; FAN_MIN_DUTY → 0</FONT><BR/><FONT POINT-SIZE="17">counts = duty × 1023  (10-bit)</FONT>> ];
+  INIT [shape=box style="filled,rounded" fillcolor="#0E2841" color="#0E2841" fontcolor="#FFFFFF" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>thrusters_init()</B></FONT><BR/><FONT POINT-SIZE="17">in setup(): ledcAttach(pin, 100 Hz, 10-bit)</FONT><BR/><FONT POINT-SIZE="17">then thrusters_off()</FONT>> ];
+  OFFN [shape=box style="filled,rounded" fillcolor="#F6D5D5" color="#C00000" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>thrusters_off()</B></FONT><BR/><FONT POINT-SIZE="17">= thrusters_set_each(0, 0)</FONT><BR/><FONT POINT-SIZE="17">used by every stop and abort</FONT>> ];
+  L1 [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>ledcWrite()</B></FONT><BR/><FONT POINT-SIZE="17">GPIO 27, 100 Hz PWM</FONT>> ];
+  L2 [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>ledcWrite()</B></FONT><BR/><FONT POINT-SIZE="17">GPIO 13, 100 Hz PWM</FONT>> ];
+  F1 [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<B>+Z fan  (Pi-FAN 5 V, 0.2 A)</B><BR/><FONT POINT-SIZE="17">logic-level N-MOSFET, low side</FONT><BR/><FONT POINT-SIZE="17">torques KestrelSAT +Z (CCW from above)</FONT>> ];
+  F2 [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<B>−Z fan  (Pi-FAN 5 V, 0.2 A)</B><BR/><FONT POINT-SIZE="17">logic-level N-MOSFET, low side</FONT><BR/><FONT POINT-SIZE="17">torques KestrelSAT −Z (CW from above)</FONT>> ];
+  {rank=same; SET; EACH; WF} {rank=same; INIT; OFFN; L1; L2}
+  SET -> EACH [ ];
+  EACH -> WF [ ];
+  WF -> L1 [ label=<<FONT POINT-SIZE="17"><B>+Z duty</B></FONT>> ];
+  WF -> L2 [ label=<<FONT POINT-SIZE="17"><B>−Z duty</B></FONT>> ];
+  L1 -> F1 [ ];
+  L2 -> F2 [ ];
+  INIT -> OFFN [style=dashed]; OFFN -> EACH [style=dashed];
+}

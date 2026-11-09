@@ -1,0 +1,36 @@
+digraph G {
+  graph [fontname="Inter" fontsize=22 bgcolor="white" pad=0.3 nodesep=0.35 ranksep=0.45 rankdir=TB newrank=true compound=true nodesep=0.4];
+  node  [fontname="Inter" fontsize=20 margin="0.18,0.08"];
+  edge  [fontname="Inter" color="#404040" penwidth=2 arrowsize=0.9];
+  A [shape=box style="filled,rounded" fillcolor="#156082" color="#0E2841" fontcolor="#FFFFFF" penwidth=2 label=<<B>cmd 16</B><BR/><FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_mag_heading_hold()</B></FONT><BR/><FONT POINT-SIZE="17">sd_createDataFile("Lab8_maghold"), CSV header, thrusters_off()</FONT>> ];
+  C [shape=diamond style="filled" fillcolor="#FFF4CC" color="#BF9000" fontcolor="#0E2841" penwidth=2 label=<<FONT POINT-SIZE="17">key = 'C'?</FONT>> margin="0.02,0.02"];
+  CAL [shape=box style="filled,rounded" fillcolor="#DCEFF8" color="#0F9ED5" fontcolor="#0E2841" penwidth=2 label=<<B>Calibrate magnetometer  (LED yellow)</B><BR/><FONT POINT-SIZE="17">turn KestrelSAT a full turn, track min/max of mag X, Y</FONT><BR/><FONT POINT-SIZE="17">offset = (max + min) / 2</FONT>> ];
+  OFF [shape=box style="filled,rounded" fillcolor="#DCEFF8" color="#0F9ED5" fontcolor="#0E2841" penwidth=2 label=<<B>Use saved offsets</B><BR/><FONT POINT-SIZE="17">MAG_OFFSET_X_UT = −50.52 µT</FONT><BR/><FONT POINT-SIZE="17">MAG_OFFSET_Y_UT = −27.41 µT</FONT>> ];
+  BIAS [shape=box style="filled,rounded" fillcolor="#DCEFF8" color="#0F9ED5" fontcolor="#0E2841" penwidth=2 label=<<B>Gyro bias and target  (LED white)</B><BR/><FONT POINT-SIZE="17">point at the heading, send a key, hold still 3 s</FONT><BR/><FONT POINT-SIZE="17">bias = mean(gyro_Z)</FONT><BR/><FONT POINT-SIZE="17">target = lab8_mag_heading(mean mag X, Y)</FONT>> ];
+  A -> C [ ];
+  C -> CAL [ label=<<FONT POINT-SIZE="17"><B>yes</B></FONT>> ];
+  C -> OFF [ label=<<FONT POINT-SIZE="17"><B>no</B></FONT>> ];
+  CAL -> BIAS [ ];
+  OFF -> BIAS [ ];
+  subgraph cluster_loop { label=<<B>Hold loop  (LED rose)  ·  runs every pass, logs every 50 ms</B>> labeljust=l style="rounded,filled" fillcolor="#F7F9FB" color="#9FB3C8" penwidth=1.5 fontcolor="#0E2841" fontsize=22 
+  K [shape=diamond style="filled" fillcolor="#FFF4CC" color="#BF9000" fontcolor="#0E2841" penwidth=2 label=<<FONT POINT-SIZE="17">key?</FONT>> margin="0.02,0.02"];
+  R [shape=box style="filled,rounded" fillcolor="#DCEFF8" color="#0F9ED5" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_read_imu()</B></FONT><BR/><FONT POINT-SIZE="17">low-pass mag X, Y  (τ = 0.2 s)</FONT><BR/><FONT POINT-SIZE="17">heading = lab8_mag_heading()</FONT><BR/><FONT POINT-SIZE="17">rate = gyro_Z − bias</FONT>> ];
+  ER [shape=box style="filled,rounded" fillcolor="#FCE6D8" color="#E97132" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_wrap180(target − heading)</B></FONT><BR/><FONT POINT-SIZE="17">× MAG_HEADING_SIGN (−1) → gyro_Z sign</FONT>> ];
+  BB [shape=box style="filled,rounded" fillcolor="#FCE6D8" color="#E97132" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>lab8_hold_fan_state()</B></FONT><BR/><FONT POINT-SIZE="17">on = 5° band (MAG_HOLD_BAND_DEG)</FONT><BR/><FONT POINT-SIZE="17">off = 0.5° from center</FONT>> ];
+  TS [shape=box style="filled,rounded" fillcolor="#DDF0D5" color="#196B24" fontcolor="#0E2841" penwidth=2 label=<<FONT FACE="JetBrains Mono" POINT-SIZE="20"><B>thrusters_set(fan_state)</B></FONT><BR/><FONT POINT-SIZE="17">+1 → +Z fan   −1 → −Z fan   0 → off</FONT>> ];
+  LG [shape=box style="filled,rounded" fillcolor="#EEEEEE" color="#7F7F7F" fontcolor="#0E2841" penwidth=2 label=<<B>Log row</B><BR/><FONT POINT-SIZE="17">SD + USB every 50 ms, XBee every 4th row</FONT>> ];
+  Z [shape=box style="filled,rounded" fillcolor="#FCE6D8" color="#E97132" fontcolor="#0E2841" penwidth=2 label=<<B>'Z' re-zero</B><BR/><FONT POINT-SIZE="17">target = current heading</FONT>> ];
+  }
+  X [shape=box style="filled,rounded" fillcolor="#F6D5D5" color="#C00000" fontcolor="#0E2841" penwidth=2 label=<<B>'X' ends the test</B><BR/><FONT POINT-SIZE="17">thrusters_off(), dataFile.close()</FONT><BR/><FONT POINT-SIZE="17">LED green, back to the menu</FONT>> ];
+  BIAS -> K [ lhead=cluster_loop];
+  K -> R [ label=<<FONT POINT-SIZE="17"><B>none</B></FONT>> ];
+  R -> ER [ ];
+  ER -> BB [ ];
+  BB -> TS [ ];
+  TS -> LG [ ];
+  LG -> K [color="#7F7F7F" style=dashed constraint=false];
+  K -> Z [ label=<<FONT POINT-SIZE="17"><B>'Z'</B></FONT>> ];
+  Z -> R [constraint=false];
+  K -> X [ label=<<FONT POINT-SIZE="17"><B>'X'</B></FONT>> ];
+  {rank=same; R; Z}
+}
